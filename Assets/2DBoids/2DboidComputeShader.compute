@@ -3,11 +3,27 @@
 struct Boid {
   float2 pos;
   float2 vel;
+  float2 target; // Target position for battalion formations
+  int battalionId; // ID of the battalion this boid belongs to
+};
+
+struct Battalion {
+  int id;
+  int startIndex;
+  int count;
+  int padding1; // Padding to match C# struct
+  float2 targetPos;
+  float2 formationSize;
+  int formationType;
+  int padding2; // Padding to match C# struct
 };
 
 StructuredBuffer<Boid> boidsIn;
 RWStructuredBuffer<Boid> boidsOut;
+StructuredBuffer<Battalion> battalions;
+
 uniform uint numBoids;
+uniform uint numBattalions;
 uniform float deltaTime;
 uniform float maxSpeed;
 uniform float minSpeed;
@@ -20,6 +36,8 @@ uniform float minDistanceSq;
 uniform float turnSpeed;
 uniform float xBound;
 uniform float yBound;
+uniform float targetFactor;
+uniform float battalionCohesionFactor;
 
 StructuredBuffer<uint> gridOffsetBuffer;
 float gridCellSize;
@@ -36,11 +54,124 @@ uint getGridID(uint2 pos) {
   return (gridDimX * pos.y) + pos.x;
 }
 
+float2 getFormationPosition(uint boidIndex, Battalion battalion) {
+  // Calculate offset based on formation type
+  float2 offset = float2(0, 0);
+  float boidSpread = 0.1f; // Spread between boids in formation
+  
+  // Calculate local index within the battalion
+  uint localIndex = boidIndex - battalion.startIndex;
+
+  // Calculate formation offset based on formation type
+  switch (battalion.formationType) {
+    case 0: // Square formation
+      {
+        // Form a square/rectangular grid
+        uint cols = ceil(sqrt((float)battalion.count));
+        uint rows = ceil((float)battalion.count / cols);
+        uint row = floor(localIndex / cols);
+        uint col = localIndex % cols;
+        
+        offset = float2(
+          (col - cols/2.0) * boidSpread * battalion.formationSize.x,
+          (row - rows/2.0) * boidSpread * battalion.formationSize.y
+        );
+      }
+      break;
+      
+    case 1: // Line formation (horizontal)
+      offset = float2(
+        (localIndex - battalion.count/2) * boidSpread * battalion.formationSize.x,
+        0
+      );
+      break;
+      
+    case 2: // Column formation (vertical)
+      offset = float2(
+        0,
+        (localIndex - battalion.count/2) * boidSpread * battalion.formationSize.y
+      );
+      break;
+      
+    case 3: // Wedge formation
+      {
+        // Basic wedge/triangle
+        uint wedgeWidth = ceil(sqrt((float)battalion.count * 2));
+        uint currentRow = 0;
+        uint currentRowStart = 0;
+        uint rowWidth = 1;
+
+        // Find which row this boid belongs to in the wedge
+        while (currentRowStart + rowWidth <= localIndex) {
+          currentRowStart += rowWidth;
+          currentRow++;
+          rowWidth++;
+        }
+
+        uint posInRow = localIndex - currentRowStart;
+        offset = float2(
+          (posInRow - rowWidth/2.0) * boidSpread * battalion.formationSize.x,
+          -currentRow * boidSpread * battalion.formationSize.y
+        );
+      }
+      break;
+      
+    case 4: // Scattered formation
+      {
+        // Using the boid's ID to create a stable but random-looking pattern
+        uint seed = boid.battalionId * 1000 + (uint)localIndex;
+        seed = seed * 747796405 + 2891336453;
+        uint word = ((seed >> ((seed >> 28) + 4)) ^ seed) * 277803737;
+        float randomValueX = ((word >> 22) ^ word) / 4294967296.0;
+        
+        seed = seed * 747796405 + 2891336453;
+        word = ((seed >> ((seed >> 28) + 4)) ^ seed) * 277803737;
+        float randomValueY = ((word >> 22) ^ word) / 4294967296.0;
+        
+        offset = float2(
+          (randomValueX - 0.5) * battalion.formationSize.x,
+          (randomValueY - 0.5) * battalion.formationSize.y
+        );
+      }
+      break;
+  }
+  
+  return battalion.targetPos + offset;
+}
+
 void MergedBehaviours(inout Boid boid) {
-  float2 center = 0;
-  float2 close = 0;
-  float2 avgVel = 0;
+  float2 center = float2(0, 0);
+  float2 battalionCenter = float2(0, 0);
+  float2 close = float2(0, 0);
+  float2 avgVel = float2(0, 0);
   uint neighbours = 0;
+  uint battalionNeighbours = 0;
+  Battalion currentBattalion;
+  bool foundBattalion = false;
+
+  // Find the battalion this boid belongs to
+  for (uint b = 0; b < numBattalions; b++) {
+    if (battalions[b].id == boid.battalionId) {
+      currentBattalion = battalions[b];
+      foundBattalion = true;
+      break;
+    }
+  }
+
+  // Calculate target position in formation
+  float2 target = boid.pos; // Default to current pos
+  if (foundBattalion) {
+    // Calculate this boid's index within all boids
+    uint boidIndex = 0;
+    for (uint i = 0; i < numBoids; i++) {
+      if (boidsIn[i].pos.x == boid.pos.x && boidsIn[i].pos.y == boid.pos.y) {
+        // Found this boid's index
+        boidIndex = i;
+        break;
+      }
+    }
+    target = getFormationPosition(boidIndex, currentBattalion);
+  }
 
   uint2 gridXY = getGridLocation(boid);
   uint cell = getGridID(gridXY);
@@ -56,10 +187,19 @@ void MergedBehaviours(inout Boid boid) {
       float distSq = dot(diff, diff);
       
       if (distSq < visualRangeSq && distSq > 0) {
+        bool sameBattalion = boid.battalionId == other.battalionId;
+        
         if (distSq < minDistanceSq) {
           float invDistSq = 1.0 / distSq;
           close += diff * invDistSq;
         }
+        
+        // Track battalion neighbors separately
+        if (sameBattalion) {
+          battalionCenter += other.pos;
+          battalionNeighbours++;
+        }
+        
         center += other.pos;
         avgVel += other.vel;
         neighbours++;
@@ -67,12 +207,24 @@ void MergedBehaviours(inout Boid boid) {
     }
   }
   
+  // Battalion cohesion - stronger cohesion with members of same battalion
+  if (battalionNeighbours > 0) {
+    battalionCenter /= battalionNeighbours;
+    boid.vel += (battalionCenter - boid.pos) * (battalionCohesionFactor * deltaTime);
+  }
+  
+  // Standard flocking behaviors
   if (neighbours > 0) {
     center /= neighbours;
     avgVel /= neighbours;
     
     boid.vel += (center - boid.pos) * (cohesionFactor * deltaTime);
     boid.vel += (avgVel - boid.vel) * (alignmentFactor * deltaTime);
+  }
+  
+  // Move toward target position in formation
+  if (length(target - boid.pos) > 0.1) {
+    boid.vel += normalize(target - boid.pos) * targetFactor * deltaTime;
   }
   
   boid.vel += close * (separationFactor * deltaTime);
@@ -111,7 +263,6 @@ void UpdateBoids(uint3 id : SV_DispatchThreadID) {
   boidsOut[id.x] = boid;
 }
 
-
 // Basic random generation
 uint randSeed;
 uint rngState;
@@ -123,11 +274,29 @@ float randPCG(float min, float max) {
   return f * (max - min) + min;
 }
 
-
 #pragma kernel GenerateBoids // ID 1
 [numthreads(blockSize, 1, 1)]
 void GenerateBoids(uint3 id : SV_DispatchThreadID) {
+  if (id.x >= numBoids) {
+    return;
+  }
+  
   rngState = randSeed + id.x;
-  boidsOut[id.x].pos = float2(randPCG(-xBound, xBound), randPCG(-yBound, yBound));
-  boidsOut[id.x].vel = float2(randPCG(-maxSpeed, maxSpeed), randPCG(-maxSpeed, maxSpeed));
+  
+  int battalionId = -1;
+  // Find which battalion this boid belongs to
+  for (uint b = 0; b < numBattalions; b++) {
+    if (id.x >= battalions[b].startIndex && id.x < battalions[b].startIndex + battalions[b].count) {
+      battalionId = battalions[b].id;
+      break;
+    }
+  }
+  
+  float2 pos = float2(randPCG(-xBound, xBound), randPCG(-yBound, yBound));
+  float2 vel = float2(randPCG(-maxSpeed, maxSpeed), randPCG(-maxSpeed, maxSpeed));
+  
+  boidsOut[id.x].pos = pos;
+  boidsOut[id.x].vel = vel;
+  boidsOut[id.x].target = pos; // Initialize target to current position
+  boidsOut[id.x].battalionId = battalionId;
 }

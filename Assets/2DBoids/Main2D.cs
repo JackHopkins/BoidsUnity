@@ -4,7 +4,7 @@ using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine.Rendering;
 
-struct Boid
+struct BoidOld
 {
   public float2 pos;
   public float2 vel;
@@ -199,6 +199,8 @@ public class Main2D : MonoBehaviour
     boidShader.SetFloat("gridCellSize", gridCellSize);
     boidShader.SetInt("gridDimY", gridDimY);
     boidShader.SetInt("gridDimX", gridDimX);
+    
+    
   }
 
   // Update is called once per frame
