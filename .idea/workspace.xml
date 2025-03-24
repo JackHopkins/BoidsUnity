@@ -5,15 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="a29717c5-c8c3-4fc2-98a6-2ca9fec8491f" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/Assets/2DBoids/BattalionManager.cs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Assets/2DBoids/BattalionManager.cs.meta" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Assets/2DBoids/TacticalBoids2D.cs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Assets/2DBoids/TacticalBoids2D.cs.meta" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Assets/2DBoids/TacticalUIManager.cs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Assets/2DBoids/TacticalUIManager.cs.meta" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Assets/2DBoids/2DboidComputeShader.compute" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/2DboidComputeShader.compute" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/2DboidShader.shader" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/2DboidShader.shader" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Assets/2DBoids/Main2D.cs" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/Main2D.cs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/TacticalBoids2D.cs" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/TacticalBoids2D.cs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/TacticalUIManager.cs" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/TacticalUIManager.cs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -29,19 +25,20 @@
     &quot;assignee&quot;: &quot;JackHopkins&quot;
   }
 }</component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "https://github.com/JackHopkins/BoidsUnity.git",
-    "accountId": "1d097aab-56cb-464e-84c1-6dfdc4562e5e"
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/JackHopkins/BoidsUnity.git&quot;,
+    &quot;accountId&quot;: &quot;1d097aab-56cb-464e-84c1-6dfdc4562e5e&quot;
   }
-}]]></component>
+}</component>
   <component name="HighlightingSettingsPerFile">
-    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/2DboidComputeShader.compute" root0="SKIP_HIGHLIGHTING" />
-    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/BattalionManager.cs" root0="SKIP_HIGHLIGHTING" />
-    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/GridShader.compute" root0="SKIP_HIGHLIGHTING" />
-    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/Main2D.cs" root0="SKIP_HIGHLIGHTING" />
-    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/TacticalBoids2D.cs" root0="SKIP_HIGHLIGHTING" />
-    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/TacticalUIManager.cs" root0="SKIP_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/2DboidComputeShader.compute" root0="FORCE_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/BattalionManager.cs" root0="FORCE_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/GridShader.compute" root0="FORCE_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/Main2D.cs" root0="FORCE_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/MoveCamera2D.cs" root0="FORCE_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/TacticalBoids2D.cs" root0="FORCE_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/TacticalUIManager.cs" root0="FORCE_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Assets/3DBoids/3DBoidComputeShader.compute" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Assets/3DBoids/GridShader3D.compute" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Assets/3DBoids/Main3D.cs" root0="SKIP_HIGHLIGHTING" />
@@ -51,6 +48,9 @@
     <setting file="file://$PROJECT_DIR$/Library/PackageCache/com.unity.burst@7a907cf5a459/Editor/BurstDisassembler.Core.x86.info.cs" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Library/PackageCache/com.unity.collections@56bff8827a7e/Unity.Collections.BurstCompatibilityGen/BurstCompatibilityTests.cs" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Library/PackageCache/com.unity.collections@56bff8827a7e/Unity.Collections/FixedStringFormatMethods.gen.cs" root0="SKIP_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Library/PackageCache/com.unity.ide.visualstudio@8140e851d83e/Editor/UnityInstallation.cs" root0="SKIP_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Library/PackageCache/com.unity.mathematics@8017b507cc74/Unity.Mathematics/Noise/classicnoise2D.cs" root0="SKIP_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Library/PackageCache/com.unity.mathematics@8017b507cc74/Unity.Mathematics/Noise/classicnoise3D.cs" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Library/PackageCache/com.unity.render-pipelines.core@e13fb214c240/Runtime/GPUDriven/InstanceCullingBatcher.cs" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Library/PackageCache/com.unity.render-pipelines.core@e13fb214c240/Runtime/PostProcessing/Shaders/ffx/ffx_fsr1.hlsl" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Library/PackageCache/com.unity.render-pipelines.universal@506b3deb0041/Runtime/2D/Light2D.cs" root0="SKIP_HIGHLIGHTING" />
@@ -65,19 +65,19 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "feature/formations",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.tslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "npm",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;feature/formations&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
     <task active="true" id="Default" summary="Default task">
@@ -87,7 +87,8 @@
       <option name="presentableId" value="Default" />
       <updated>1742838507917</updated>
       <workItem from="1742838509071" duration="790000" />
-      <workItem from="1742839328816" duration="5222000" />
+      <workItem from="1742839328816" duration="8388000" />
+      <workItem from="1742850674952" duration="599000" />
     </task>
     <servers />
   </component>
@@ -100,24 +101,5 @@
   </component>
   <component name="VcsManagerConfiguration">
     <option name="CLEAR_INITIAL_COMMIT_MESSAGE" value="true" />
-  </component>
-  <component name="XDebuggerManager">
-    <breakpoint-manager>
-      <breakpoints>
-        <line-breakpoint enabled="true" type="DotNet Breakpoints">
-          <url>file://$PROJECT_DIR$/Assets/2DBoids/TacticalBoids2D.cs</url>
-          <line>224</line>
-          <properties documentPath="$PROJECT_DIR$/Assets/2DBoids/TacticalBoids2D.cs" containingFunctionPresentation="Method 'Start'">
-            <startOffsets>
-              <option value="8791" />
-            </startOffsets>
-            <endOffsets>
-              <option value="8828" />
-            </endOffsets>
-          </properties>
-          <option name="timeStamp" value="5" />
-        </line-breakpoint>
-      </breakpoints>
-    </breakpoint-manager>
   </component>
 </project>

@@ -105,14 +105,20 @@ public class TacticalBoids2D : MonoBehaviour
             if (battalionManager == null)
                 battalionManager = gameObject.AddComponent<BattalionManager>();
         }
+        Debug.Log($"TacticalBoids2D.Awake() called on GameObject: {gameObject.name}, Active: {gameObject.activeInHierarchy}");
+
     }
 
     // Start is called before the first frame update
     void Start()
     {
+        Debug.Log("TacticalBoids2D.Start() - Beginning initialization");
         // Zoom camera based on number of boids
         Camera.main.orthographicSize = Mathf.Max(2, Mathf.Sqrt(numBoids) / 10 + edgeMargin);
         Camera.main.transform.position = new Vector3(0, 0, -10);
+        
+        Debug.Log("Starting camera");
+        
         GetComponent<MoveCamera2D>().Start();
 
         boidText.text = "Boids: " + numBoids;
@@ -120,7 +126,9 @@ public class TacticalBoids2D : MonoBehaviour
         yBound = Camera.main.orthographicSize - edgeMargin;
         turnSpeed = maxSpeed * 3;
         minSpeed = maxSpeed * 0.75f;
-
+        
+        Debug.Log("Getting kernel IDs");
+        
         // Get kernel IDs
         updateBoidsKernel = boidShader.FindKernel("UpdateBoids");
         generateBoidsKernel = boidShader.FindKernel("GenerateBoids");
@@ -130,10 +138,12 @@ public class TacticalBoids2D : MonoBehaviour
         sumBlocksKernel = gridShader.FindKernel("SumBlocks");
         addSumsKernel = gridShader.FindKernel("AddSums");
         rearrangeBoidsKernel = gridShader.FindKernel("RearrangeBoids");
+        
+        Debug.Log("Setting up compute buffers");
 
         // Setup compute buffer - modified to include target and battalionId
-        boidBuffer = new ComputeBuffer(numBoids, 20); // 5 float2s (pos, vel, target) + 1 int
-        boidBufferOut = new ComputeBuffer(numBoids, 20);
+        boidBuffer = new ComputeBuffer(numBoids, Marshal.SizeOf<Boid>()); // 5 float2s (pos, vel, target) + 1 int
+        boidBufferOut = new ComputeBuffer(numBoids, Marshal.SizeOf<Boid>());
         boidShader.SetBuffer(updateBoidsKernel, "boidsIn", boidBufferOut);
         boidShader.SetBuffer(updateBoidsKernel, "boidsOut", boidBuffer);
         boidShader.SetInt("numBoids", numBoids);
@@ -150,7 +160,9 @@ public class TacticalBoids2D : MonoBehaviour
         boidShader.SetFloat("alignmentFactor", alignmentFactor);
         boidShader.SetFloat("targetFactor", targetFactor);
         boidShader.SetFloat("battalionCohesionFactor", battalionCohesionFactor);
-
+        
+        Debug.Log("Initialising battalions");
+        
         // Initialize battalions
         battalionManager.InitializeBattalions(numBoids);
         
@@ -219,11 +231,12 @@ public class TacticalBoids2D : MonoBehaviour
 
         // Spatial grid setup
         gridCellSize = visualRange;
-        Debug.Log(visualRange);
-        gridDimX = Mathf.FloorToInt(xBound * 2 / gridCellSize) + 30;
-        gridDimY = Mathf.FloorToInt(yBound * 2 / gridCellSize) + 30;
+        gridDimX = Mathf.Max(1, Mathf.FloorToInt(xBound * 2 / gridCellSize) + 30);
+        gridDimY = Mathf.Max(1, Mathf.FloorToInt(yBound * 2 / gridCellSize) + 30);
         gridTotalCells = gridDimX * gridDimY;
+        blocks = Mathf.Max(1, Mathf.CeilToInt(gridTotalCells / blockSize));
 
+        Debug.Log($"Grid dimensions: {gridDimX}x{gridDimY}, Total cells: {gridTotalCells}, Blocks: {blocks}");
         // Don't generate grid on CPU if over CPU limit
         if (numBoids <= cpuLimit)
         {
@@ -283,6 +296,8 @@ public class TacticalBoids2D : MonoBehaviour
         
         Debug.Log($"BattalionData size: {Marshal.SizeOf<BattalionData>()} bytes");
         Debug.Log($"Buffer stride: {battalionBuffer.stride} bytes");
+        
+        Debug.Log("TacticalBoids2D.Start() - Initialization complete");
     }
     
     void VerifyAndSetComputeBuffers()
@@ -311,7 +326,7 @@ public class TacticalBoids2D : MonoBehaviour
         // Check gridOffsetBuffer
         if (gridOffsetBuffer == null || !gridOffsetBuffer.IsValid())
         {
-            Debug.LogError("gridOffsetBuffer is null or invalid. Creating a new one...");
+            Debug.LogError("gridOffsetBuffer is null or invalid. Creating a new one..." + gridTotalCells);
             gridOffsetBuffer = new ComputeBuffer(gridTotalCells, 4);
         }
 
@@ -340,9 +355,11 @@ public class TacticalBoids2D : MonoBehaviour
         if (battalionBuffer == null || !battalionBuffer.IsValid())
         {
             Debug.LogError("battalionBuffer is null or invalid. Creating a new one...");
+            int structSize = Marshal.SizeOf<BattalionData>();
+            Debug.Log($"Creating battalion buffer with stride: {structSize} bytes");
             battalionBuffer = new ComputeBuffer(
                 Mathf.Max(1, battalionManager.battalions.Count),
-                40
+                structSize
             );
             UpdateBattalionBuffer();
         }
@@ -521,6 +538,27 @@ public class TacticalBoids2D : MonoBehaviour
         }
 
         try {
+            // Get the exact size using Marshal
+            int structSize = Marshal.SizeOf<BattalionData>();
+            Debug.Log($"BattalionData struct size: {structSize} bytes");
+            
+            // Make sure buffer has correct size
+            if (battalionBuffer == null || !battalionBuffer.IsValid() || battalionBuffer.stride != structSize)
+            {
+                if (battalionBuffer != null && battalionBuffer.IsValid())
+                    battalionBuffer.Release();
+                    
+                battalionBuffer = new ComputeBuffer(
+                    Mathf.Max(1, battalionManager.battalions.Count),
+                    structSize
+                );
+                
+                Debug.Log($"Created new buffer with stride: {battalionBuffer.stride}");
+                
+                // Need to reassign buffer to shader
+                boidShader.SetBuffer(updateBoidsKernel, "battalions", battalionBuffer);
+            }
+            
             BattalionData[] battalionDataArray = new BattalionData[battalionManager.battalions.Count];
             for (int i = 0; i < battalionManager.battalions.Count; i++)
             {
@@ -531,8 +569,10 @@ public class TacticalBoids2D : MonoBehaviour
                     startIndex = battalion.startIndex,
                     count = battalion.count,
                     padding1 = 0,
-                    targetPos = battalion.targetPosition,
-                    formationSize = battalion.formationSize,
+                    targetPosX = battalion.targetPosition.x,
+                    targetPosY = battalion.targetPosition.y,
+                    formationSizeX = battalion.formationSize.x,
+                    formationSizeY = battalion.formationSize.y,
                     formationType = (int)battalion.formationType,
                     padding2 = 0
                 };
@@ -540,7 +580,7 @@ public class TacticalBoids2D : MonoBehaviour
             }
         
             Debug.Log($"Setting data for {battalionDataArray.Length} battalions. First battalion: ID={battalionDataArray[0].id}, Start={battalionDataArray[0].startIndex}, Count={battalionDataArray[0].count}");
-        
+            
             battalionBuffer.SetData(battalionDataArray);
         }
         catch (System.Exception e) {

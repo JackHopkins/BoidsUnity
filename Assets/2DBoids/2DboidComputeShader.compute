@@ -11,11 +11,13 @@ struct Battalion {
   int id;
   int startIndex;
   int count;
-  int padding1; // Padding to match C# struct
-  float2 targetPos;
-  float2 formationSize;
+  int padding1;
+  float targetPosX;
+  float targetPosY;
+  float formationSizeX;
+  float formationSizeY;
   int formationType;
-  int padding2; // Padding to match C# struct
+  int padding2;
 };
 
 StructuredBuffer<Boid> boidsIn;
@@ -73,15 +75,15 @@ float2 getFormationPosition(uint boidIndex, Battalion battalion) {
         uint col = localIndex % cols;
         
         offset = float2(
-          (col - cols/2.0) * boidSpread * battalion.formationSize.x,
-          (row - rows/2.0) * boidSpread * battalion.formationSize.y
+          (col - cols/2.0) * boidSpread * battalion.formationSizeX,
+          (row - rows/2.0) * boidSpread * battalion.formationSizeY
         );
       }
       break;
       
     case 1: // Line formation (horizontal)
       offset = float2(
-        (localIndex - battalion.count/2) * boidSpread * battalion.formationSize.x,
+        (localIndex - battalion.count/2) * boidSpread * battalion.formationSizeX,
         0
       );
       break;
@@ -89,7 +91,7 @@ float2 getFormationPosition(uint boidIndex, Battalion battalion) {
     case 2: // Column formation (vertical)
       offset = float2(
         0,
-        (localIndex - battalion.count/2) * boidSpread * battalion.formationSize.y
+        (localIndex - battalion.count/2) * boidSpread * battalion.formationSizeY
       );
       break;
       
@@ -110,8 +112,8 @@ float2 getFormationPosition(uint boidIndex, Battalion battalion) {
 
         uint posInRow = localIndex - currentRowStart;
         offset = float2(
-          (posInRow - rowWidth/2.0) * boidSpread * battalion.formationSize.x,
-          -currentRow * boidSpread * battalion.formationSize.y
+          (posInRow - rowWidth/2.0) * boidSpread * battalion.formationSizeX,
+          -currentRow * boidSpread * battalion.formationSizeY
         );
       }
       break;
@@ -119,7 +121,7 @@ float2 getFormationPosition(uint boidIndex, Battalion battalion) {
     case 4: // Scattered formation
       {
         // Using the boid's ID to create a stable but random-looking pattern
-        uint seed = boid.battalionId * 1000 + (uint)localIndex;
+        uint seed = battalion.id * 1000 + (uint)localIndex;
         seed = seed * 747796405 + 2891336453;
         uint word = ((seed >> ((seed >> 28) + 4)) ^ seed) * 277803737;
         float randomValueX = ((word >> 22) ^ word) / 4294967296.0;
@@ -129,14 +131,14 @@ float2 getFormationPosition(uint boidIndex, Battalion battalion) {
         float randomValueY = ((word >> 22) ^ word) / 4294967296.0;
         
         offset = float2(
-          (randomValueX - 0.5) * battalion.formationSize.x,
-          (randomValueY - 0.5) * battalion.formationSize.y
+          (randomValueX - 0.5) * battalion.formationSizeX,
+          (randomValueY - 0.5) * battalion.formationSizeY
         );
       }
       break;
   }
   
-  return battalion.targetPos + offset;
+  return float2(battalion.targetPosX, battalion.targetPosY) + offset;
 }
 
 void MergedBehaviours(inout Boid boid) {

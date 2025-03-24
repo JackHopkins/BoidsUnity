@@ -16,7 +16,7 @@ public class Main2D : MonoBehaviour
 
   [Header("Performance")]
   [SerializeField] int numBoids = 500;
-  bool useGpu = false;
+  bool useGpu = true;
 
   [Header("Settings")]
   [SerializeField] float maxSpeed = 2;

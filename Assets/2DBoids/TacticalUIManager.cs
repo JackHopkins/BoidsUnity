@@ -4,17 +4,19 @@ using System.Collections.Generic;
 using Unity.Mathematics;
 using System.Runtime.InteropServices;
 
-[StructLayout(LayoutKind.Sequential, Size = 32)]
-struct BattalionData
+[StructLayout(LayoutKind.Sequential)]
+public struct BattalionData
 {
     public int id;
     public int startIndex;
     public int count;
-    public int padding1; // Add padding to ensure alignment
-    public float2 targetPos;
-    public float2 formationSize;
+    public int padding1;
+    public float targetPosX;
+    public float targetPosY;
+    public float formationSizeX;
+    public float formationSizeY;
     public int formationType;
-    public int padding2; // Add padding to ensure alignment
+    public int padding2;
 }
 
 public class TacticalUIManager : MonoBehaviour
