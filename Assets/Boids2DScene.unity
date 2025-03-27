@@ -268,6 +268,16 @@ MonoBehaviour:
   boidShader: {fileID: 7200000, guid: a1454690a72b340d4b8203edc92c1611, type: 3}
   gridShader: {fileID: 7200000, guid: 53f2660ac43d4400ea62a6e0fdda1c46, type: 3}
   boidMat: {fileID: 2100000, guid: b306058b2105d479ebd81169967e3d99, type: 2}
+  useQuadTree: 1
+  maxQuadTreeDepth: 8
+  maxBoidsPerNode: 32
+  initialQuadTreeSize: 100
+  quadTreeShader: {fileID: 7200000, guid: ea6569df25b349d6abbbdbb9dba2b88c, type: 3}
+  teamRatio: 0.5
+  intraTeamCohesionMultiplier: 1.5
+  interTeamRepulsionMultiplier: 1.5
+  team0Color: {r: 0, g: 0, b: 1, a: 1}
+  team1Color: {r: 1, g: 0, b: 0, a: 1}
 --- !u!114 &519420034
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -443,7 +453,7 @@ Transform:
   m_GameObject: {fileID: 1909174394}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 1988}
+  m_LocalPosition: {x: 288, y: 0, z: -261}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []

@@ -1,4 +1,6 @@
 #define blockSize 1024
+#define NODE_LEAF 1
+#define NODE_ACTIVE 2
 
 struct Boid {
   float2 pos;
@@ -12,13 +14,28 @@ struct Obstacle {
   float strength;
 };
 
+// Add QuadNode structure definition - it was missing
+struct QuadNode {
+  float2 center;
+  float size;
+  uint childIndex;
+  uint startIndex;
+  uint count;
+  uint flags;
+};
+
 StructuredBuffer<Obstacle> obstacles;
-uniform uint numObstacles;
-uniform float obstacleAvoidanceWeight;
-
-
 StructuredBuffer<Boid> boidsIn;
 RWStructuredBuffer<Boid> boidsOut;
+StructuredBuffer<QuadNode> quadNodes;
+StructuredBuffer<uint> activeNodes;
+StructuredBuffer<uint> nodeCount;
+StructuredBuffer<uint> boidIndices;
+
+uniform RWStructuredBuffer<uint2> boidNodeAssignment; // Stores node index for each boid
+uniform uint numObstacles;
+uniform float obstacleAvoidanceWeight;
+uniform int useQuadTree;
 uniform uint numBoids;
 uniform float deltaTime;
 uniform float maxSpeed;
@@ -53,6 +70,74 @@ uint getGridID(uint2 pos) {
   return (gridDimX * pos.y) + pos.x;
 }
 
+void FindNearbyBoidsQuadTree(float2 position, float radiusSq, inout float2 center, 
+                           inout float2 close, inout float2 avgVel, 
+                           inout uint sameTeamNeighbours, inout uint otherTeamNeighbours, 
+                           uint boidTeam) {
+    // Use a stack to avoid recursion
+    uint stack[32];
+    uint stackSize = 0;
+    
+    // Start with root node
+    stack[stackSize++] = 0;
+    
+    while (stackSize > 0) {
+        // Pop a node from the stack
+        uint nodeIndex = stack[--stackSize];
+        QuadNode node = quadNodes[nodeIndex];
+        
+        // Check if this node is too far away
+        float2 closest = max(position - node.size, node.center - node.size);
+        closest = min(closest, node.center + node.size);
+        float2 diff = position - closest;
+        float distSq = dot(diff, diff);
+        
+        if (distSq > radiusSq) {
+            // Node is too far, skip it
+            continue;
+        }
+        
+        // Check if this is a leaf node
+        if (node.flags & NODE_LEAF) {
+            // Process all boids in this leaf - they are at indices [startIndex, startIndex+count)
+            for (uint i = 0; i < node.count; i++) {
+                uint boidIdx = node.startIndex + i;
+                if (boidIdx >= numBoids) continue;
+                
+                Boid other = boidsIn[boidIdx];
+                
+                float2 boidDiff = position - other.pos;
+                float boidDistSq = dot(boidDiff, boidDiff);
+                
+                if (boidDistSq < radiusSq && boidDistSq > 0) {
+                    bool sameTeam = boidTeam == other.team;
+                    
+                    if (boidDistSq < minDistanceSq) {
+                        float repulsionStrength = sameTeam ? 1.0 : interTeamRepulsionMultiplier;
+                        float invDistSq = 1.0 / boidDistSq;
+                        close += boidDiff * invDistSq * repulsionStrength;
+                    }
+                    
+                    if (sameTeam) {
+                        center += other.pos;
+                        avgVel += other.vel;
+                        sameTeamNeighbours++;
+                    } else {
+                        otherTeamNeighbours++;
+                    }
+                }
+            }
+        } else {
+            // Internal node, add children to stack
+            for (uint i = 0; i < 4; i++) {
+                // Make sure the child index is valid
+                if (node.childIndex + i < nodeCount[0]) {
+                    stack[stackSize++] = node.childIndex + i;
+                }
+            }
+        }
+    }
+}
 
 float2 CalculateObstacleAvoidance(float2 position) {
   float2 avoidanceForce = float2(0, 0);
@@ -74,70 +159,91 @@ float2 CalculateObstacleAvoidance(float2 position) {
 
 
 void MergedBehaviours(inout Boid boid) {
-  float2 center = 0;
-  float2 close = 0;
-  float2 avgVel = 0;
-  uint sameTeamNeighbours = 0;
-  uint otherTeamNeighbours = 0;
+    float2 center = 0;
+    float2 close = 0;
+    float2 avgVel = 0;
+    uint sameTeamNeighbours = 0;
+    uint otherTeamNeighbours = 0;
 
-  uint2 gridXY = getGridLocation(boid);
-  uint cell = getGridID(gridXY);
-  
-  // Loop Around Own Cell
-  for (uint y = cell - gridDimX; y <= cell + gridDimX; y += gridDimX) {
-    uint start = gridOffsetBuffer[y - 2];
-    uint end = gridOffsetBuffer[y + 1];
-    
-    for (uint i = start; i < end; i++) {
-      Boid other = boidsIn[i];
-      float2 diff = boid.pos - other.pos;
-      float distSq = dot(diff, diff);
-      
-      if (distSq < visualRangeSq && distSq > 0) {
-        // Check if same team
-        bool sameTeam = boid.team == other.team;
+    if (useQuadTree == 1) {
+        // Use quad-tree for neighbor finding
+        FindNearbyBoidsQuadTree(boid.pos, visualRangeSq, center, close, avgVel, 
+                              sameTeamNeighbours, otherTeamNeighbours, boid.team);
+    } else {
+        // Use existing grid-based approach
+        uint2 gridXY = getGridLocation(boid);
+        uint cell = getGridID(gridXY);
         
-        // Apply stronger separation for other team
-        if (distSq < minDistanceSq) {
-		  
-          float repulsionStrength = 1.0f;//sameTeam ? 1.0 : interTeamRepulsionMultiplier;
-          float invDistSq = 1.0 / distSq;
-          close += diff * invDistSq * repulsionStrength;
+        // Add bounds checking to avoid invalid memory access
+        if (cell >= gridDimX * gridDimY || cell < gridDimX * 2) {
+            return;
         }
         
-        // Only apply cohesion and alignment with same team
-        if (sameTeam) {
-          center += other.pos;
-          avgVel += other.vel;
-          sameTeamNeighbours++;
-        } else {
-          otherTeamNeighbours++;
+        // Existing grid-based code...
+        for (uint y = cell - gridDimX; y <= cell + gridDimX; y += gridDimX) {
+            // Avoid out-of-bounds access
+            if (y < 2 || y >= gridDimX * gridDimY - 1) continue;
+            
+            uint start = gridOffsetBuffer[y - 2];
+            uint end = gridOffsetBuffer[y + 1];
+            
+            // Ensure start < end to avoid invalid access
+            if (start >= end) continue;
+            
+            for (uint i = start; i < end; i++) {
+                // Bounds check
+                if (i >= numBoids) continue;
+                
+                Boid other = boidsIn[i];
+                float2 diff = boid.pos - other.pos;
+                float distSq = dot(diff, diff);
+                
+                if (distSq < visualRangeSq && distSq > 0) {
+                    bool sameTeam = boid.team == other.team;
+                    
+                    if (distSq < minDistanceSq) {
+                        float repulsionStrength = sameTeam ? 1.0 : interTeamRepulsionMultiplier;
+                        float invDistSq = 1.0 / distSq;
+                        close += diff * invDistSq * repulsionStrength;
+                    }
+                    
+                    if (sameTeam) {
+                        center += other.pos;
+                        avgVel += other.vel;
+                        sameTeamNeighbours++;
+                    } else {
+                        otherTeamNeighbours++;
+                    }
+                }
+            }
         }
-      }
     }
-  }
-  
-  // Apply cohesion and alignment only with same team members
-  if (sameTeamNeighbours > 0) {
-    center /= sameTeamNeighbours;
-    avgVel /= sameTeamNeighbours;
     
-    // Apply stronger cohesion within team
-    boid.vel += (center - boid.pos) * (cohesionFactor * intraTeamCohesionMultiplier * deltaTime);
-    boid.vel += (avgVel - boid.vel) * (alignmentFactor * deltaTime);
-  }
-  
-  boid.vel += close * (separationFactor * deltaTime);
-  
-  float2 obstacleForce = CalculateObstacleAvoidance(boid.pos);
-  boid.vel += obstacleForce * obstacleAvoidanceWeight * deltaTime;
+    // Existing behavior code continues...
+    if (sameTeamNeighbours > 0) {
+        center /= sameTeamNeighbours;
+        avgVel /= sameTeamNeighbours;
+        
+        boid.vel += (center - boid.pos) * (cohesionFactor * intraTeamCohesionMultiplier * deltaTime);
+        boid.vel += (avgVel - boid.vel) * (alignmentFactor * deltaTime);
+    }
+    
+    boid.vel += close * (separationFactor * deltaTime);
+    
+    float2 obstacleForce = CalculateObstacleAvoidance(boid.pos);
+    boid.vel += obstacleForce * obstacleAvoidanceWeight * deltaTime;
 }
-
 
 void LimitSpeed(inout Boid boid) {
   float speed = length(boid.vel);
-  float clampedSpeed = clamp(speed, minSpeed, maxSpeed);
-  boid.vel *= clampedSpeed / speed;
+  // Avoid division by zero
+  if (speed > 0.0001) {
+    float clampedSpeed = clamp(speed, minSpeed, maxSpeed);
+    boid.vel *= clampedSpeed / speed;
+  } else {
+    // If speed is near zero, give it a small random velocity
+    boid.vel = float2(0.01, 0.01);
+  }
 }
 
 void KeepInBounds(inout Boid boid) {
@@ -149,7 +255,7 @@ void KeepInBounds(inout Boid boid) {
   }
 }
 
-#pragma kernel UpdateBoids // ID 0
+#pragma kernel UpdateBoids
 [numthreads(blockSize, 1, 1)]
 void UpdateBoids(uint3 id : SV_DispatchThreadID) {
   if (id.x >= numBoids) {
@@ -180,9 +286,13 @@ float randPCG(float min, float max) {
 }
 
 
-#pragma kernel GenerateBoids // ID 1
+#pragma kernel GenerateBoids
 [numthreads(blockSize, 1, 1)]
 void GenerateBoids(uint3 id : SV_DispatchThreadID) {
+  if (id.x >= numBoids) {
+    return;
+  }
+  
   rngState = randSeed + id.x;
   boidsOut[id.x].pos = float2(randPCG(-xBound, xBound), randPCG(-yBound, yBound));
   boidsOut[id.x].vel = float2(randPCG(-maxSpeed, maxSpeed), randPCG(-maxSpeed, maxSpeed));
