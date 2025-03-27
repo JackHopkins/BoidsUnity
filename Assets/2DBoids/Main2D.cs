@@ -3,11 +3,23 @@ using UnityEngine.UI;
 using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine.Rendering;
+using System;
+using System.Collections.Generic;
+
+// Add this struct right after the Boid struct
+struct ObstacleData
+{
+    public float2 pos;
+    public float radius;
+    public float strength;
+}
+
 
 struct Boid
 {
   public float2 pos;
   public float2 vel;
+  public uint team;
 }
 
 public class Main2D : MonoBehaviour
@@ -29,6 +41,12 @@ public class Main2D : MonoBehaviour
   [SerializeField] float separationFactor = 1;
   [SerializeField] float alignmentFactor = 5;
 
+  [Header("Obstacles")]
+  [SerializeField] private List<Obstacle2D> obstacles = new List<Obstacle2D>();
+  [SerializeField] private float obstacleAvoidanceWeight = 5f;
+  [SerializeField] ComputeBuffer obstacleBuffer;
+  [SerializeField] int maxObstacles = 10;
+
   [Header("Prefabs")]
   [SerializeField] Text fpsText;
   [SerializeField] Text boidText;
@@ -39,6 +57,13 @@ public class Main2D : MonoBehaviour
   [SerializeField] Material boidMat;
   Vector2[] triangleVerts;
   GraphicsBuffer trianglePositions;
+
+  [Header("Team Settings")]
+  [SerializeField] float teamRatio = 0.5f; // Ratio of boids in team 0 vs team 1
+  [SerializeField] float intraTeamCohesionMultiplier = 1.5f; // Stronger cohesion within same team
+  [SerializeField] float interTeamRepulsionMultiplier = 2.5f; // Stronger repulsion between different teams
+  [SerializeField] Color team0Color = Color.blue;
+  [SerializeField] Color team1Color = Color.red;
 
   float minSpeed;
   float turnSpeed;
@@ -76,6 +101,41 @@ public class Main2D : MonoBehaviour
     triangleVerts = GetTriangleVerts();
   }
 
+	// Add this method to initialize obstacles in Start() after existing initialization
+private void InitializeObstacles()
+{
+    // Find all obstacles in the scene if not set in inspector
+    if (obstacles.Count == 0)
+    {
+        obstacles.AddRange(FindObjectsOfType<Obstacle2D>());
+    }
+    
+    // Create the obstacle buffer for GPU processing
+    if (useGpu)
+    {
+        // Make sure we have at least one element in the buffer to avoid errors
+        obstacleBuffer = new ComputeBuffer(Mathf.Max(1, obstacles.Count), 16); // 16 bytes per obstacle
+        var obstacleData = new ObstacleData[Mathf.Max(1, obstacles.Count)];
+        
+        for (int i = 0; i < obstacles.Count; i++)
+        {
+            obstacleData[i] = new ObstacleData
+            {
+                pos = new float2(obstacles[i].transform.position.x, obstacles[i].transform.position.y),
+                radius = obstacles[i].repulsionRadius,
+                strength = obstacles[i].repulsionStrength
+            };
+        }
+        
+        obstacleBuffer.SetData(obstacleData);
+        
+        // Set the obstacle buffer to the compute shader
+        boidShader.SetBuffer(updateBoidsKernel, "obstacles", obstacleBuffer);
+        boidShader.SetInt("numObstacles", obstacles.Count);
+        boidShader.SetFloat("obstacleAvoidanceWeight", obstacleAvoidanceWeight);
+    }
+}
+
   // Start is called before the first frame update
   void Start()
   {
@@ -100,9 +160,11 @@ public class Main2D : MonoBehaviour
     addSumsKernel = gridShader.FindKernel("AddSums");
     rearrangeBoidsKernel = gridShader.FindKernel("RearrangeBoids");
 
+	InitializeObstacles();
+
     // Setup compute buffer
-    boidBuffer = new ComputeBuffer(numBoids, 16);
-    boidBufferOut = new ComputeBuffer(numBoids, 16);
+    boidBuffer = new ComputeBuffer(numBoids, 20);
+    boidBufferOut = new ComputeBuffer(numBoids, 20);
     boidShader.SetBuffer(updateBoidsKernel, "boidsIn", boidBufferOut);
     boidShader.SetBuffer(updateBoidsKernel, "boidsOut", boidBuffer);
     boidShader.SetInt("numBoids", numBoids);
@@ -118,6 +180,14 @@ public class Main2D : MonoBehaviour
     boidShader.SetFloat("separationFactor", separationFactor);
     boidShader.SetFloat("alignmentFactor", alignmentFactor);
 
+	boidShader.SetFloat("teamRatio", teamRatio);
+	boidShader.SetFloat("intraTeamCohesionMultiplier", intraTeamCohesionMultiplier);
+	boidShader.SetFloat("interTeamRepulsionMultiplier", interTeamRepulsionMultiplier);
+
+	// Set up team colours
+	boidMat.SetColor("_Team0Color", team0Color);
+	boidMat.SetColor("_Team1Color", team1Color);
+
     // Generate boids on GPU if over CPU limit
     if (numBoids <= cpuLimit)
     {
@@ -131,6 +201,7 @@ public class Main2D : MonoBehaviour
         var boid = new Boid();
         boid.pos = pos;
         boid.vel = vel;
+		boid.team = (uint)(i < numBoids * teamRatio ? 0 : 1); // Assign team based on ratio
         boids[i] = boid;
       }
       boidBuffer.SetData(boids);
@@ -199,7 +270,33 @@ public class Main2D : MonoBehaviour
     boidShader.SetFloat("gridCellSize", gridCellSize);
     boidShader.SetInt("gridDimY", gridDimY);
     boidShader.SetInt("gridDimX", gridDimX);
+
+
   }
+	
+private void UpdateObstacleData()
+{
+    if (useGpu && obstacles.Count > 0)
+    {
+        var obstacleData = new ObstacleData[obstacles.Count];
+        
+        for (int i = 0; i < obstacles.Count; i++)
+        {
+            if (obstacles[i] != null)
+            {
+                obstacleData[i] = new ObstacleData
+                {
+                    pos = new float2(obstacles[i].transform.position.x, obstacles[i].transform.position.y),
+                    radius = obstacles[i].repulsionRadius,
+                    strength = obstacles[i].repulsionStrength
+                };
+            }
+        }
+        
+        obstacleBuffer.SetData(obstacleData);
+    }
+}
+
 
   // Update is called once per frame
   void Update()
@@ -209,6 +306,9 @@ public class Main2D : MonoBehaviour
     if (useGpu)
     {
       boidShader.SetFloat("deltaTime", Time.deltaTime);
+	
+	  // Can be called here to update the positions (CALL SPARINGLY)
+	  UpdateObstacleData();
 
       // Clear indices
       gridShader.Dispatch(clearGridKernel, blocks, 1, 1);
@@ -270,49 +370,83 @@ public class Main2D : MonoBehaviour
     Graphics.RenderPrimitives(rp, MeshTopology.Triangles, numBoids * 3);
   }
 
-  void MergedBehaviours(ref Boid boid)
-  {
+  // In Main2D.cs, MergedBehaviours method
+	void MergedBehaviours(ref Boid boid)
+	{
     float2 center = float2.zero;
     float2 close = float2.zero;
     float2 avgVel = float2.zero;
-    int neighbours = 0;
+    int sameTeamNeighbours = 0;
+    int otherTeamNeighbours = 0;
 
     var gridXY = GetGridLocation(boid);
     int gridCell = GetGridIDbyLoc(gridXY);
 
     for (int y = gridCell - gridDimX; y <= gridCell + gridDimX; y += gridDimX)
     {
-      int start = gridOffsets[y - 2];
-      int end = gridOffsets[y + 1];
-      for (int i = start; i < end; i++)
-      {
-        Boid other = boidsTemp[i];
-        var diff = boid.pos - other.pos;
-        var distanceSq = math.dot(diff, diff);
-        if (distanceSq > 0 && distanceSq < visualRangeSq)
+        // Check bounds to avoid index errors
+        if (y < 0 || y >= gridOffsets.Length - 2) continue;
+        
+        int start = gridOffsets[y - 2];
+        int end = gridOffsets[y + 1];
+        for (int i = start; i < end; i++)
         {
-          if (distanceSq < minDistanceSq)
-          {
-            close += diff / distanceSq;
-          }
-          center += other.pos;
-          avgVel += other.vel;
-          neighbours++;
+            Boid other = boidsTemp[i];
+            var diff = boid.pos - other.pos;
+            var distanceSq = math.dot(diff, diff);
+            if (distanceSq > 0 && distanceSq < visualRangeSq)
+            {
+                bool sameTeam = boid.team == other.team;
+                
+                if (distanceSq < minDistanceSq)
+                {
+                    float repulsionStrength = sameTeam ? 1.0f : interTeamRepulsionMultiplier;
+                    close += diff / distanceSq * repulsionStrength;
+                }
+                
+                if (sameTeam)
+                {
+                    center += other.pos;
+                    avgVel += other.vel;
+                    sameTeamNeighbours++;
+                }
+                else
+                {
+                    otherTeamNeighbours++;
+                }
+            }
         }
-      }
     }
 
-    if (neighbours > 0)
+    if (sameTeamNeighbours > 0)
     {
-      center /= neighbours;
-      avgVel /= neighbours;
+        center /= sameTeamNeighbours;
+        avgVel /= sameTeamNeighbours;
 
-      boid.vel += (center - boid.pos) * (cohesionFactor * Time.deltaTime);
-      boid.vel += (avgVel - boid.vel) * (alignmentFactor * Time.deltaTime);
+        // Apply stronger cohesion with same team
+        boid.vel += (center - boid.pos) * (cohesionFactor * intraTeamCohesionMultiplier * Time.deltaTime);
+        boid.vel += (avgVel - boid.vel) * (alignmentFactor * Time.deltaTime);
     }
 
     boid.vel += close * (separationFactor * Time.deltaTime);
-  }
+    
+    // Add obstacle avoidance
+    float2 obstacleForce = float2.zero;
+    
+    if (obstacles != null && obstacles.Count > 0)
+    {
+        foreach (var obstacle in obstacles)
+        {
+            if (obstacle != null)
+            {
+                obstacleForce += obstacle.GetRepulsionForce(boid.pos);
+            }
+        }
+        
+        boid.vel += obstacleForce * obstacleAvoidanceWeight * Time.deltaTime;
+    }
+}
+
 
   void LimitSpeed(ref Boid boid)
   {
@@ -427,28 +561,50 @@ public class Main2D : MonoBehaviour
   }
 
   void OnDestroy()
-  {
+{
+    // First check if native arrays are created before trying to dispose them
     if (boids.IsCreated)
     {
-      boids.Dispose();
-      boidsTemp.Dispose();
+        boids.Dispose();
+    }
+    
+    if (boidsTemp.IsCreated)
+    {
+        boidsTemp.Dispose();
     }
 
     if (grid.IsCreated)
     {
-      grid.Dispose();
-      gridOffsets.Dispose();
+        grid.Dispose();
+    }
+    
+    if (gridOffsets.IsCreated)
+    {
+        gridOffsets.Dispose();
     }
 
-    boidBuffer.Release();
-    boidBufferOut.Release();
-    gridBuffer.Release();
-    gridOffsetBuffer.Release();
-    gridOffsetBufferIn.Release();
-    gridSumsBuffer.Release();
-    gridSumsBuffer2.Release();
+    // Release all compute buffers if they exist
+    SafeReleaseBuffer(ref boidBuffer);
+    SafeReleaseBuffer(ref boidBufferOut);
+    SafeReleaseBuffer(ref gridBuffer);
+    SafeReleaseBuffer(ref gridOffsetBuffer);
+    SafeReleaseBuffer(ref gridOffsetBufferIn);
+    SafeReleaseBuffer(ref gridSumsBuffer);
+    SafeReleaseBuffer(ref gridSumsBuffer2);
+    SafeReleaseBuffer(ref obstacleBuffer);
     trianglePositions.Release();
-  }
+}
+
+// Add this helper method for safely releasing compute buffers
+private void SafeReleaseBuffer(ref ComputeBuffer buffer)
+{
+    if (buffer != null)
+    {
+        buffer.Release();
+        buffer = null;
+    }
+}
+
 
   Vector2[] GetTriangleVerts()
   {

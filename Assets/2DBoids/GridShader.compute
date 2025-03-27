@@ -3,6 +3,7 @@
 struct Boid {
   float2 pos;
   float2 vel;
+  uint team;
 };
 
 StructuredBuffer<Boid> boids;

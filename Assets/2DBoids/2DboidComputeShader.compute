@@ -3,7 +3,19 @@
 struct Boid {
   float2 pos;
   float2 vel;
+  uint team;
 };
+
+struct Obstacle {
+  float2 pos;
+  float radius;
+  float strength;
+};
+
+StructuredBuffer<Obstacle> obstacles;
+uniform uint numObstacles;
+uniform float obstacleAvoidanceWeight;
+
 
 StructuredBuffer<Boid> boidsIn;
 RWStructuredBuffer<Boid> boidsOut;
@@ -21,6 +33,11 @@ uniform float turnSpeed;
 uniform float xBound;
 uniform float yBound;
 
+uniform float teamRatio;
+uniform float intraTeamCohesionMultiplier;
+uniform float interTeamRepulsionMultiplier;
+
+
 StructuredBuffer<uint> gridOffsetBuffer;
 float gridCellSize;
 uint gridDimY;
@@ -36,11 +53,32 @@ uint getGridID(uint2 pos) {
   return (gridDimX * pos.y) + pos.x;
 }
 
+
+float2 CalculateObstacleAvoidance(float2 position) {
+  float2 avoidanceForce = float2(0, 0);
+  
+  for (uint i = 0; i < numObstacles; i++) {
+    float2 diff = position - obstacles[i].pos;
+    float distance = length(diff);
+    
+    if (distance < obstacles[i].radius) {
+      // Normalize and scale the force inversely with distance
+      float2 direction = normalize(diff);
+      float force = obstacles[i].strength * (1.0 - (distance / obstacles[i].radius));
+      avoidanceForce += direction * force;
+    }
+  }
+  
+  return avoidanceForce;
+}
+
+
 void MergedBehaviours(inout Boid boid) {
   float2 center = 0;
   float2 close = 0;
   float2 avgVel = 0;
-  uint neighbours = 0;
+  uint sameTeamNeighbours = 0;
+  uint otherTeamNeighbours = 0;
 
   uint2 gridXY = getGridLocation(boid);
   uint cell = getGridID(gridXY);
@@ -56,27 +94,45 @@ void MergedBehaviours(inout Boid boid) {
       float distSq = dot(diff, diff);
       
       if (distSq < visualRangeSq && distSq > 0) {
+        // Check if same team
+        bool sameTeam = boid.team == other.team;
+        
+        // Apply stronger separation for other team
         if (distSq < minDistanceSq) {
+		  
+          float repulsionStrength = 1.0f;//sameTeam ? 1.0 : interTeamRepulsionMultiplier;
           float invDistSq = 1.0 / distSq;
-          close += diff * invDistSq;
+          close += diff * invDistSq * repulsionStrength;
         }
-        center += other.pos;
-        avgVel += other.vel;
-        neighbours++;
+        
+        // Only apply cohesion and alignment with same team
+        if (sameTeam) {
+          center += other.pos;
+          avgVel += other.vel;
+          sameTeamNeighbours++;
+        } else {
+          otherTeamNeighbours++;
+        }
       }
     }
   }
   
-  if (neighbours > 0) {
-    center /= neighbours;
-    avgVel /= neighbours;
+  // Apply cohesion and alignment only with same team members
+  if (sameTeamNeighbours > 0) {
+    center /= sameTeamNeighbours;
+    avgVel /= sameTeamNeighbours;
     
-    boid.vel += (center - boid.pos) * (cohesionFactor * deltaTime);
+    // Apply stronger cohesion within team
+    boid.vel += (center - boid.pos) * (cohesionFactor * intraTeamCohesionMultiplier * deltaTime);
     boid.vel += (avgVel - boid.vel) * (alignmentFactor * deltaTime);
   }
   
   boid.vel += close * (separationFactor * deltaTime);
+  
+  float2 obstacleForce = CalculateObstacleAvoidance(boid.pos);
+  boid.vel += obstacleForce * obstacleAvoidanceWeight * deltaTime;
 }
+
 
 void LimitSpeed(inout Boid boid) {
   float speed = length(boid.vel);
@@ -130,4 +186,6 @@ void GenerateBoids(uint3 id : SV_DispatchThreadID) {
   rngState = randSeed + id.x;
   boidsOut[id.x].pos = float2(randPCG(-xBound, xBound), randPCG(-yBound, yBound));
   boidsOut[id.x].vel = float2(randPCG(-maxSpeed, maxSpeed), randPCG(-maxSpeed, maxSpeed));
+  float threshold = numBoids * teamRatio;
+  boidsOut[id.x].team = id.x < threshold ? 0 : 1;
 }
