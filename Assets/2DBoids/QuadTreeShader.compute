@@ -2,6 +2,7 @@
 #define blockSize 1024
 #define NODE_LEAF 1
 #define NODE_ACTIVE 2
+#define MaxQuadNodes 16384
 
 struct Boid {
     float2 pos;
@@ -26,12 +27,14 @@ RWStructuredBuffer<uint> activeNodes;        // List of active node indices
 RWStructuredBuffer<uint> boidIndices;        // Maps from quadtree order to boid index
 StructuredBuffer<Boid> boids;                // Original boids
 RWStructuredBuffer<Boid> boidsOut;           // Reordered boids
+RWStructuredBuffer<uint> debugOutput; // New buffer for debug info
 
 // Parameters
 uint maxDepth;             // Maximum depth of the quad-tree
 uint maxBoidsPerNode;      // Maximum boids per leaf node before subdivision
 uint numBoids;             // Total number of boids
 float worldSize;           // Size of the world (half-width)
+uint originalCount;
 
 // Bit flags
 #define NODE_LEAF 1
@@ -45,20 +48,22 @@ void ClearQuadTree() {
     nodeCount[0] = 1;
     activeNodeCount[0] = 1;
     
-    // Initialize root node
-    QuadNode root;
+    // Initialize root node but KEEP the count
+    QuadNode root = quadNodes[0];
+    // Save existing count
+    uint existingCount = root.count;
+    
+    // Reset other fields
     root.center = float2(0, 0);
     root.size = worldSize;
-    root.childIndex = 0;        // No children yet
-    root.startIndex = 0;        // No boids yet
-    root.count = 0;
-    root.flags = NODE_LEAF | NODE_ACTIVE;  // Start as an active leaf
+    root.childIndex = 0;
+    root.startIndex = 0;
+    // Restore the count
+    root.count = existingCount;
+    root.flags = NODE_LEAF | NODE_ACTIVE;
     
     quadNodes[0] = root;
-    
-    // Add root to active nodes
     activeNodes[0] = 0;
-    activeNodeCount[0] = 1;
 }
 
 // Determine which quadrant a point belongs to (0=NE, 1=NW, 2=SW, 3=SE)
@@ -82,93 +87,78 @@ float2 GetChildCenter(float2 parentCenter, float parentSize, uint quadrant) {
 [numthreads(blockSize, 1, 1)]
 void SubdivideNodes(uint3 id : SV_DispatchThreadID) {
     // Get total active nodes
-    uint totalActiveNodes;
-    InterlockedAdd(activeNodeCount[0], 0, totalActiveNodes);
+    uint totalActiveNodes = activeNodeCount[0];
     
     if (id.x >= totalActiveNodes) return;
     
     uint nodeIndex = activeNodes[id.x];
     QuadNode node = quadNodes[nodeIndex];
     
-    // Only subdivide leaf nodes that have too many boids and haven't been subdivided yet
-    if ((node.flags & NODE_LEAF) == 0 || node.count <= maxBoidsPerNode) return;
+    // Check if this is a leaf node that needs subdivision
+    bool isLeaf = (node.flags & NODE_LEAF) != 0;
+    bool needsSubdivision = node.count > maxBoidsPerNode;
     
-    // Allocate four children
-    uint childIndex;
-    InterlockedAdd(nodeCount[0], 4, childIndex);
-    
-    // If we'd exceed the node buffer, don't subdivide
-    if (childIndex + 4 >= 16384) return;
-    
-    // Update parent to point to children
-    node.childIndex = childIndex;
-    node.flags &= ~NODE_LEAF; // Clear leaf flag
-    quadNodes[nodeIndex] = node;
-    
-    // Create four child nodes
-    float childSize = node.size * 0.5;
-    
-    for (uint i = 0; i < 4; i++) {
-        QuadNode child;
-        child.center = GetChildCenter(node.center, node.size, i);
-        child.size = childSize;
-        child.childIndex = 0;
-        child.startIndex = 0;
-        child.count = 0;
-        child.flags = NODE_LEAF | NODE_ACTIVE;
+    if (isLeaf && needsSubdivision) {
+        // Allocate four children - use atomic to avoid conflicts
+        uint childIndex;
+        InterlockedAdd(nodeCount[0], 4, childIndex);
         
-        // Add the new node
-        quadNodes[childIndex + i] = child;
+        // Prevent buffer overflow
+        if (childIndex + 4 >= 16384) return;
         
-        // Add to active nodes
-        uint activeIdx;
-        InterlockedAdd(activeNodeCount[0], 1, activeIdx);
-        activeNodes[activeIdx] = childIndex + i;
+        // Update parent to point to children
+        node.childIndex = childIndex;
+        node.flags &= ~NODE_LEAF; // No longer a leaf
+        quadNodes[nodeIndex] = node;
+        
+        // Create four child nodes
+        float childSize = node.size * 0.5;
+        
+        for (uint i = 0; i < 4; i++) {
+            QuadNode child;
+            child.center = GetChildCenter(node.center, node.size, i);
+            child.size = childSize;
+            child.childIndex = 0;
+            child.startIndex = 0;
+            child.count = 0;
+            child.flags = NODE_LEAF | NODE_ACTIVE;
+            
+            // Add the new node
+            quadNodes[childIndex + i] = child;
+            
+            // Add to active nodes list - use atomic to get a unique index
+            uint activeIdx;
+            InterlockedAdd(activeNodeCount[0], 1, activeIdx);
+            activeNodes[activeIdx] = childIndex + i;
+        }
     }
 }
 
-// Insert boids into quad-tree (kernel 1)
 #pragma kernel InsertBoids
 [numthreads(blockSize, 1, 1)]
 void InsertBoids(uint3 id : SV_DispatchThreadID) {
     if (id.x >= numBoids) return;
     
-    Boid boid = boids[id.x];
+    uint rootNodeIndex = 0;
     
-    // Start at the root
-    uint currentNodeIndex = 0;
-    uint depth = 0;
+    boidIndices[id.x * 2] = id.x;
+    boidIndices[id.x * 2 + 1] = rootNodeIndex;
     
-    // Find the leaf node this boid belongs to
-    while (depth < maxDepth) {
-        QuadNode node = quadNodes[currentNodeIndex];
-        
-        // If it's a leaf, we're done
-        if (node.flags & NODE_LEAF) {
-            break;
-        }
-        
-        // Determine which quadrant this boid belongs to
-        uint quadrant = GetQuadrant(node.center, boid.pos);
-        uint childIndex = node.childIndex + quadrant;
-        
-        // Safety check - don't go past valid nodes
-        if (childIndex >= nodeCount[0]) {
-            break;
-        }
-        
-        // Move to child
-        currentNodeIndex = childIndex;
-        depth++;
-    }
+    // Increment count in dedicated counter buffer
+    InterlockedAdd(nodeCount[rootNodeIndex], 1);
+}
+
+#pragma kernel UpdateNodeCounts
+[numthreads(blockSize, 1, 1)]
+void UpdateNodeCounts(uint3 id : SV_DispatchThreadID) {
+    uint totalNodes;
+    InterlockedAdd(nodeCount[0], 0, totalNodes);
     
-    // Add this boid to the leaf node we found
-    uint nodeLocalIndex;
-    InterlockedAdd(quadNodes[currentNodeIndex].count, 1, nodeLocalIndex);
+    if (id.x >= totalNodes) return;
     
-    // Store both the boid index and which node it belongs to
-    boidIndices[id.x * 2] = id.x;                 // Boid index
-    boidIndices[id.x * 2 + 1] = currentNodeIndex; // Node index
+    QuadNode node = quadNodes[id.x];
+    node.count = nodeCount[id.x];
+    quadNodes[id.x] = node;
 }
 
 // Build list of active nodes (kernel 2)
@@ -223,7 +213,113 @@ void ActivateRoot() {
     root.flags |= NODE_ACTIVE;
     quadNodes[0] = root;
     
-    // Ensure it's in the active nodes list
+    // Set the active node count to 1 (no need for InterlockedAdd here)
     activeNodeCount[0] = 1;
     activeNodes[0] = 0;
+}
+
+#pragma kernel TestSubdivide
+[numthreads(1, 1, 1)]
+void TestSubdivide() {
+    // Get the root node
+    QuadNode root = quadNodes[0];
+    
+    // Set child index manually
+    root.childIndex = 1;
+    root.flags &= ~NODE_LEAF; // Clear leaf flag
+    
+    // Create four children
+    for (uint i = 0; i < 4; i++) {
+        QuadNode child;
+        child.center = GetChildCenter(root.center, root.size, i);
+        child.size = root.size * 0.5;
+        child.childIndex = 0;
+        child.startIndex = 0;
+        child.count = 0;
+        child.flags = NODE_LEAF | NODE_ACTIVE;
+        
+        // Write the child node
+        quadNodes[1 + i] = child;
+    }
+    
+    // Write back the modified root node
+    quadNodes[0] = root;
+    
+    // Update nodeCount
+    nodeCount[0] = 5;
+}
+
+// Alternative approach to count boids in nodes
+#pragma kernel CountBoids
+[numthreads(blockSize, 1, 1)]
+void CountBoids(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= numBoids) return;
+    
+    // Always assign to root for now
+    uint nodeIndex = 0;
+    
+    // Store boid index and node
+    boidIndices[id.x * 2] = id.x;
+    boidIndices[id.x * 2 + 1] = nodeIndex;
+    
+    // We'll count them in a separate pass
+}
+
+#pragma kernel SumNodeCounts
+[numthreads(1, 1, 1)]
+void SumNodeCounts() {
+    // Reset count
+    QuadNode root = quadNodes[0];
+    root.count = 0;
+    quadNodes[0] = root;
+    
+    // Count all boids assigned to root
+    for (uint i = 0; i < numBoids; i++) {
+        uint nodeIndex = boidIndices[i * 2 + 1];
+        if (nodeIndex == 0) {
+            root.count++;
+        }
+    }
+    
+    // Write back
+    quadNodes[0] = root;
+}
+
+#pragma kernel ClearNodeCounts
+[numthreads(blockSize, 1, 1)]
+void ClearNodeCounts(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= MaxQuadNodes) return;
+    
+    // Clear all node counts except the root (which we'll rebuild)
+    if (id.x > 0) {
+        nodeCount[id.x] = 0;
+    }
+}
+
+#pragma kernel RedistributeBoids
+[numthreads(blockSize, 1, 1)]
+void RedistributeBoids(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= numBoids) return;
+    
+    // Get the current boid index and node assignment
+    uint boidIndex = boidIndices[id.x * 2];
+    uint nodeIndex = boidIndices[id.x * 2 + 1];
+    
+    // Get the boid and node
+    Boid boid = boids[boidIndex];
+    QuadNode node = quadNodes[nodeIndex];
+    
+    // Check if this node has been subdivided (is no longer a leaf)
+    if ((node.flags & NODE_LEAF) == 0 && node.childIndex > 0) {
+        // Determine quadrant for this boid
+        uint quadrant = GetQuadrant(node.center, boid.pos);
+        uint childIndex = node.childIndex + quadrant;
+        
+        // Update the boid's node assignment
+        boidIndices[id.x * 2 + 1] = childIndex;
+        
+        // Update counts in dedicated counter buffer (decrement parent, increment child)
+        InterlockedAdd(nodeCount[nodeIndex], 0xFFFFFFFF); // Subtract 1 (two's complement of 1)
+        InterlockedAdd(nodeCount[childIndex], 1);
+    }
 }
