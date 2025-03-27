@@ -174,6 +174,15 @@ private void UpdateQuadTree()
 {
     if (!useQuadTree || quadTreeShader == null) return;
 
+    // Debug output
+    if (Time.frameCount % 120 == 0) {
+        Debug.Log($"Frame {Time.frameCount}: Updating quad tree");
+        
+        uint[] nodeCountDebug = new uint[1];
+        nodeCountBuffer.GetData(nodeCountDebug);
+        Debug.Log($"Current node count: {nodeCountDebug[0]}");
+    }
+
     // Step 1: Clear and initialize quad-tree
     quadTreeShader.Dispatch(clearQuadTreeKernel, 1, 1, 1);
     
@@ -185,10 +194,18 @@ private void UpdateQuadTree()
     quadTreeShader.Dispatch(activateRootKernel, 1, 1, 1);
 
     // Step 3: Insert boids into root node (updates nodeCounts buffer)
+    quadTreeShader.SetBuffer(insertBoidsKernel, "boids", boidBuffer);
     quadTreeShader.Dispatch(insertBoidsKernel, Mathf.CeilToInt(numBoids / blockSize), 1, 1);
 
     // Step 4: Update the quadNodes with counts from nodeCounts buffer
     quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / blockSize), 1, 1);
+
+    // Debug - check if root has boids
+    if (Time.frameCount % 120 == 0) {
+        QuadNode[] rootNode = new QuadNode[1];
+        quadNodesBuffer.GetData(rootNode, 0, 0, 1);
+        Debug.Log($"Root node count: {rootNode[0].count}, flags: {rootNode[0].flags}");
+    }
 
     // Step 5: Iterative subdivision and redistribution
     for (int i = 0; i < maxQuadTreeDepth; i++)
@@ -202,14 +219,33 @@ private void UpdateQuadTree()
         // Update node counts
         quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / blockSize), 1, 1);
         
-        // Debug check if we need to continue
-        if (i > 0 && i % 3 == 0) {
-            // Check root node count
-            uint[] rootCount = new uint[1];
-            nodeCountsBuffer.GetData(rootCount, 0, 0, 1);
+        // Debug check - only periodically to avoid spam
+        if (Time.frameCount % 120 == 0 && i == maxQuadTreeDepth - 1) {
+            uint[] activeNodeCountDebug = new uint[1];
+            activeNodeCountBuffer.GetData(activeNodeCountDebug);
+            Debug.Log($"Active nodes after iteration {i}: {activeNodeCountDebug[0]}");
             
-            // If most boids have been redistributed from the root, we can stop
-            if (rootCount[0] < numBoids * 0.1f) break;
+            // Check if we have child nodes
+            if (activeNodeCountDebug[0] > 1) {
+                uint[] firstFewActiveNodes = new uint[Math.Min(5, (int)activeNodeCountDebug[0])];
+                activeNodesBuffer.GetData(firstFewActiveNodes, 0, 0, firstFewActiveNodes.Length);
+                
+                string nodeStr = string.Join(", ", firstFewActiveNodes);
+                Debug.Log($"First few active nodes: {nodeStr}");
+                
+                // Check a sample of nodes
+                QuadNode[] sampleNodes = new QuadNode[firstFewActiveNodes.Length];
+                for (int n = 0; n < firstFewActiveNodes.Length; n++) {
+                    uint nodeIdx = firstFewActiveNodes[n];
+                    quadNodesBuffer.GetData(sampleNodes, (int)nodeIdx, (int)nodeIdx, 1);
+                }
+                
+                // Log sample node info
+                for (int n = 0; n < sampleNodes.Length; n++) {
+                    Debug.Log($"Node {firstFewActiveNodes[n]}: Count={sampleNodes[n].count}, " +
+                             $"StartIndex={sampleNodes[n].startIndex}, Flags={sampleNodes[n].flags}");
+                }
+            }
         }
     }
 
@@ -228,17 +264,6 @@ private void UpdateQuadTree()
     // Use quadtree for boid calculations
     boidShader.SetInt("useQuadTree", 1);
     boidShader.Dispatch(updateBoidsKernel, Mathf.CeilToInt(numBoids / blockSize), 1, 1);
-    
-    // Debug output
-    if (Time.frameCount % 60 == 0) {
-        uint[] nodeCounts = new uint[5]; // Root + first 4 children
-        nodeCountsBuffer.GetData(nodeCounts, 0, 0, 5);
-        
-        uint[] totalNodesCount = new uint[1];
-        nodeCountBuffer.GetData(totalNodesCount);
-        
-        Debug.Log($"Frame {Time.frameCount}: Total nodes: {totalNodesCount[0]}, Root: {nodeCounts[0]}, Children: {nodeCounts[1]},{nodeCounts[2]},{nodeCounts[3]},{nodeCounts[4]}");
-    }
 }
 
   // Start is called before the first frame update

@@ -6,8 +6,8 @@
   <component name="ChangeListManager">
     <list default="true" id="a29717c5-c8c3-4fc2-98a6-2ca9fec8491f" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/2DboidComputeShader.compute" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/2DboidComputeShader.compute" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Assets/2DBoids/Main2D.cs" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/Main2D.cs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/QuadTreeShader.compute" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/QuadTreeShader.compute" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
