@@ -32,7 +32,7 @@ struct QuadNode
 
 public class Main2D : MonoBehaviour
 {
-  const float blockSize = 1024f;
+  const float blockSize = 256f;
   const int NODE_LEAF = 1;
   const int NODE_ACTIVE = 2;
 
@@ -56,6 +56,11 @@ public class Main2D : MonoBehaviour
   [SerializeField] private float obstacleAvoidanceWeight = 5f;
   [SerializeField] ComputeBuffer obstacleBuffer;
   [SerializeField] int maxObstacles = 10;
+
+  [Header("Debug Settings")]
+  [SerializeField] private bool drawQuadTreeGizmos = false;
+  [SerializeField] private int gizmoDetailLevel = 2; // Controls how many levels to draw
+
 
   [Header("Prefabs")]
   [SerializeField] Text fpsText;
@@ -91,7 +96,9 @@ public class Main2D : MonoBehaviour
   int updateBoidsKernel, generateBoidsKernel;
   int updateGridKernel, clearGridKernel, prefixSumKernel, sumBlocksKernel, addSumsKernel, rearrangeBoidsKernel;
   int blocks;
-  int countBoidsKernel, sumNodeCountsKernel, updateNodeCountsKernel, redistributeBoidsKernel, clearNodeCountsKernel;
+  int countBoidsKernel, sumNodeCountsKernel, updateNodeCountsKernel, clearNodeCountsKernel;
+
+  private bool useUnifiedKernel = true; // Set to true to use the unified approach
 
   ComputeBuffer boidBuffer;
   ComputeBuffer boidBufferOut;
@@ -100,6 +107,7 @@ public class Main2D : MonoBehaviour
   ComputeBuffer gridOffsetBufferIn;
   ComputeBuffer gridSumsBuffer;
   ComputeBuffer gridSumsBuffer2;
+  
 
   private ComputeBuffer quadNodesBuffer;
   private ComputeBuffer nodeCountBuffer;       // Counter for nodes
@@ -107,13 +115,20 @@ public class Main2D : MonoBehaviour
   private ComputeBuffer activeNodesBuffer;     // List of active nodes
   private ComputeBuffer activeNodeCountBuffer; // Counter for active nodes
   private ComputeBuffer nodeCountsBuffer; // Dedicated buffer for atomic counting
+  private ComputeBuffer subdivDebugBuffer;
 
-
+  private int recountBoidsKernel;
   private int clearQuadTreeKernel;
   private int insertBoidsKernel;
-  private int buildActiveNodesKernel;
+  //private int buildActiveNodesKernel;
   private int sortBoidsKernel;
-  private int subdivideNodesKernel;
+  //private int subdivideNodesKernel;
+  private int initializeTreeKernel;
+  private int buildUnifiedKernel;
+  private int subdivideAndRedistributeKernel;
+  private bool printQuadTreeDebugInfo = true;
+  private int debugPrintInterval = 60; // Print every 60 frames
+
 
   private const int MaxQuadNodes = 16384; // Maximum number of quad-tree nodes
 
@@ -134,7 +149,192 @@ public class Main2D : MonoBehaviour
     numSlider.maxValue = Mathf.Log(useGpu ? gpuLimit : cpuLimit, 2);
     triangleVerts = GetTriangleVerts();
   }
-
+    
+// Add this method to your Main2D class
+private void DebugPrintQuadTreeInfo()
+{
+    if (!printQuadTreeDebugInfo || Time.frameCount % debugPrintInterval != 0)
+        return;
+    
+    // Don't try to visualize if the buffer hasn't been created yet
+    if (quadNodesBuffer == null || nodeCountBuffer == null)
+        return;
+    
+    // Create a diagnostic buffer to check subdivision conditions
+    ComputeBuffer diagBuffer = new ComputeBuffer(10, 4);
+    
+    // Initialize with zeros to detect if values are being written
+    uint[] initialData = new uint[10];
+    diagBuffer.SetData(initialData);
+    
+    // Find the diagnostic kernel
+    int diagKernel = quadTreeShader.FindKernel("DiagnoseSubdivision");
+    
+    // Set all necessary buffers and parameters
+    quadTreeShader.SetBuffer(diagKernel, "quadNodes", quadNodesBuffer);
+    quadTreeShader.SetBuffer(diagKernel, "nodeCount", nodeCountBuffer);
+    quadTreeShader.SetBuffer(diagKernel, "diagData", diagBuffer);
+    quadTreeShader.SetInt("maxBoidsPerNode", maxBoidsPerNode);
+    
+    // Dispatch the kernel
+    quadTreeShader.Dispatch(diagKernel, 1, 1, 1);
+    
+    // Read back the diagnostic data
+    uint[] diagData = new uint[10];
+    diagBuffer.GetData(diagData);
+    
+    // Extract condition results
+    bool isLeaf = diagData[0] == 1;
+    bool countExceedsThreshold = diagData[1] == 1;
+    bool hasSpaceForChildren = diagData[2] == 1;
+    bool sizeAboveThreshold = diagData[3] == 1;
+    
+    // Extract actual values
+    uint flags = diagData[4];
+    uint count = diagData[5];
+    uint threshold = diagData[6];
+    uint currentNodeCount = diagData[7];
+    uint size = diagData[8];
+    
+    // Read node count and active node count from buffers
+    uint[] counts = new uint[1];
+    nodeCountBuffer.GetData(counts);
+    int totalNodeCount = (int)counts[0];
+    
+    uint[] activeCounts = new uint[1];
+    activeNodeCountBuffer.GetData(activeCounts);
+    int activeNodeCount = (int)activeCounts[0];
+    
+    // Avoid reading too many nodes
+    if (totalNodeCount <= 0 || totalNodeCount > MaxQuadNodes) {
+        Debug.Log($"Invalid node count: {totalNodeCount}");
+        diagBuffer.Release();
+        return;
+    }
+    
+    // Read node data - only enough for our display
+    int maxNodesToShow = Mathf.Min(totalNodeCount, 50);
+    QuadNode[] allNodes = new QuadNode[maxNodesToShow];
+    quadNodesBuffer.GetData(allNodes, 0, 0, maxNodesToShow);
+    
+    // Read active node indices if available
+    int[] activeIndices = new int[activeNodeCount];
+    if (activeNodeCount > 0 && activeNodeCount < MaxQuadNodes) {
+        uint[] activeNodesData = new uint[activeNodeCount];
+        activeNodesBuffer.GetData(activeNodesData, 0, 0, activeNodeCount);
+        for (int i = 0; i < activeNodeCount; i++) {
+            activeIndices[i] = (int)activeNodesData[i];
+        }
+    }
+    
+    // Start building our report
+    System.Text.StringBuilder sb = new System.Text.StringBuilder();
+    
+    // Section 1: Subdivision diagnostic
+    sb.AppendLine("=== SUBDIVISION DIAGNOSTIC ===");
+    sb.AppendLine($"Root node - Flags: {flags}, Count: {count}, Size: {size}");
+    sb.AppendLine($"System - maxBoidsPerNode: {threshold}, Current node count: {currentNodeCount}");
+    sb.AppendLine("\nCondition checks:");
+    sb.AppendLine($"1. Is Leaf Node: {(isLeaf ? "✓ YES" : "✗ NO")}");
+    sb.AppendLine($"2. Count > Threshold: {(countExceedsThreshold ? "✓ YES" : "✗ NO")} ({count} vs {threshold})");
+    sb.AppendLine($"3. Has Space for Children: {(hasSpaceForChildren ? "✓ YES" : "✗ NO")} ({currentNodeCount} vs {MaxQuadNodes - 4})");
+    sb.AppendLine($"4. Size Above Minimum: {(sizeAboveThreshold ? "✓ YES" : "✗ NO")} ({size} vs 2.0)");
+    
+    // Overall subdivision decision
+    bool shouldSubdivide = isLeaf && countExceedsThreshold && hasSpaceForChildren && sizeAboveThreshold;
+    sb.AppendLine($"\nFINAL RESULT: Should Subdivide = {(shouldSubdivide ? "YES" : "NO")}");
+    
+    // Identify specific blocking condition
+    if (!shouldSubdivide) {
+        sb.AppendLine("\nBLOCKING CONDITIONS:");
+        if (!isLeaf) sb.AppendLine("- Node is not marked as a leaf node");
+        if (!countExceedsThreshold) sb.AppendLine("- Boid count does not exceed threshold");
+        if (!hasSpaceForChildren) sb.AppendLine("- Not enough space for child nodes");
+        if (!sizeAboveThreshold) sb.AppendLine("- Node size is too small");
+    }
+    
+    // Section 2: Quad Tree Structure
+    sb.AppendLine("\n=== QUAD TREE STRUCTURE ===");
+    sb.AppendLine($"Total nodes: {totalNodeCount}, Active nodes: {activeNodeCount}");
+    sb.AppendLine("\nQuad Tree Nodes:");
+    sb.AppendLine("NodeIdx\tIsLeaf\tIsActive\tBoidCount\tSize\tCenter\tChildIdx");
+    sb.AppendLine("----------------------------------------------------------------------");
+    
+    // Add info for each node
+    for (int i = 0; i < maxNodesToShow; i++) {
+        QuadNode node = allNodes[i];
+        bool nodeIsLeaf = (node.flags & NODE_LEAF) != 0;
+        bool isActive = (node.flags & NODE_ACTIVE) != 0;
+        bool isInActiveList = System.Array.IndexOf(activeIndices, i) >= 0;
+        
+        string activeStatus = isActive ? "Yes" : "No";
+        if (isInActiveList && !isActive) activeStatus = "Listed";
+        if (!isInActiveList && isActive) activeStatus = "Flagged";
+        
+        sb.AppendLine($"{i}\t{(nodeIsLeaf ? "Yes" : "No")}\t{activeStatus}\t{node.count}\t{node.size}\t({node.center.x:F1}, {node.center.y:F1})\t{node.childIndex}");
+        
+        // Also print child info if this node has children
+        if (!nodeIsLeaf && node.childIndex > 0 && node.childIndex < maxNodesToShow) {
+            for (int c = 0; c < 4; c++) {
+                int childIdx = (int)node.childIndex + c;
+                if (childIdx < maxNodesToShow) {
+                    QuadNode child = allNodes[childIdx];
+                    sb.AppendLine($"  └─{childIdx}\t{((child.flags & NODE_LEAF) != 0 ? "Yes" : "No")}\t{((child.flags & NODE_ACTIVE) != 0 ? "Yes" : "No")}\t{child.count}\t{child.size}\t({child.center.x:F1}, {child.center.y:F1})\t{child.childIndex}");
+                }
+            }
+        }
+    }
+    
+    if (totalNodeCount > maxNodesToShow) {
+        sb.AppendLine($"... and {totalNodeCount - maxNodesToShow} more nodes");
+    }
+    
+    // Section 3: Boid distribution
+    sb.AppendLine("\n=== BOID DISTRIBUTION ===");
+    
+    // Print summary of boid distribution
+    int[] countHistogram = new int[10]; // Count nodes with 0, 1-5, 6-10, etc. boids
+    int maxBoidsInNode = 0;
+    int nodesWithBoids = 0;
+    int totalBoidsInNodes = 0;
+    
+    for (int i = 0; i < maxNodesToShow; i++) {
+        int boidCount = (int)allNodes[i].count;
+        totalBoidsInNodes += boidCount;
+        
+        if (boidCount > 0) {
+            nodesWithBoids++;
+            maxBoidsInNode = Mathf.Max(maxBoidsInNode, boidCount);
+        }
+        
+        if (boidCount == 0) countHistogram[0]++;
+        else if (boidCount <= 5) countHistogram[1]++;
+        else if (boidCount <= 10) countHistogram[2]++;
+        else if (boidCount <= 20) countHistogram[3]++;
+        else if (boidCount <= 50) countHistogram[4]++;
+        else if (boidCount <= 100) countHistogram[5]++;
+        else if (boidCount <= 200) countHistogram[6]++;
+        else countHistogram[7]++;
+    }
+    
+    sb.AppendLine($"Total boids in nodes: {totalBoidsInNodes} (should match numBoids: {numBoids})");
+    sb.AppendLine($"Nodes with boids: {nodesWithBoids} of {totalNodeCount}");
+    sb.AppendLine($"Max boids in a single node: {maxBoidsInNode} (threshold: {maxBoidsPerNode})");
+    sb.AppendLine($"Empty nodes: {countHistogram[0]}");
+    sb.AppendLine($"Nodes with 1-5 boids: {countHistogram[1]}");
+    sb.AppendLine($"Nodes with 6-10 boids: {countHistogram[2]}");
+    sb.AppendLine($"Nodes with 11-20 boids: {countHistogram[3]}");
+    sb.AppendLine($"Nodes with 21-50 boids: {countHistogram[4]}");
+    sb.AppendLine($"Nodes with 51-100 boids: {countHistogram[5]}");
+    sb.AppendLine($"Nodes with 101-200 boids: {countHistogram[6]}");
+    sb.AppendLine($"Nodes with >200 boids: {countHistogram[7]}");
+    
+    // Log the complete report
+    Debug.Log(sb.ToString());
+    
+    // Clean up
+    diagBuffer.Release();
+}
 	// Add this method to initialize obstacles in Start() after existing initialization
   private void InitializeObstacles()
   {
@@ -174,96 +374,345 @@ private void UpdateQuadTree()
 {
     if (!useQuadTree || quadTreeShader == null) return;
 
-    // Debug output
-    if (Time.frameCount % 120 == 0) {
-        Debug.Log($"Frame {Time.frameCount}: Updating quad tree");
+    // OPTIMIZATION 1: Only rebuild quadtree every N frames
+    // This dramatically reduces GPU overhead when boids move slowly
+    if (Time.frameCount % 3 != 0) {
+        // Just run the simulation using the existing quadtree
+        boidShader.SetBuffer(updateBoidsKernel, "boidsIn", boidBuffer);
+        boidShader.SetBuffer(updateBoidsKernel, "boidsOut", boidBufferOut);
+        boidShader.SetFloat("deltaTime", Time.deltaTime);
+        boidShader.SetInt("useQuadTree", 1);
+        boidShader.Dispatch(updateBoidsKernel, Mathf.CeilToInt(numBoids / blockSize), 1, 1);
         
-        uint[] nodeCountDebug = new uint[1];
-        nodeCountBuffer.GetData(nodeCountDebug);
-        Debug.Log($"Current node count: {nodeCountDebug[0]}");
+        // Swap buffers
+        var temp = boidBuffer;
+        boidBuffer = boidBufferOut;
+        boidBufferOut = temp;
+        return;
     }
 
-    // Step 1: Clear and initialize quad-tree
-    quadTreeShader.Dispatch(clearQuadTreeKernel, 1, 1, 1);
-    
-    // Clear node counts before we start
-    quadTreeShader.Dispatch(clearNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / blockSize), 1, 1);
+    // First, completely clear the quadtree and node counts
+    // This is critical to avoid stale data between frames
+    int clearNodeCountsKernel = quadTreeShader.FindKernel("ClearNodeCounts");
+    quadTreeShader.SetBuffer(clearNodeCountsKernel, "nodeCounts", nodeCountsBuffer);
+    quadTreeShader.Dispatch(clearNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
 
-    // Step 2: Activate the root node
-    int activateRootKernel = quadTreeShader.FindKernel("ActivateRoot");
-    quadTreeShader.Dispatch(activateRootKernel, 1, 1, 1);
-
-    // Step 3: Insert boids into root node (updates nodeCounts buffer)
-    quadTreeShader.SetBuffer(insertBoidsKernel, "boids", boidBuffer);
-    quadTreeShader.Dispatch(insertBoidsKernel, Mathf.CeilToInt(numBoids / blockSize), 1, 1);
-
-    // Step 4: Update the quadNodes with counts from nodeCounts buffer
-    quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / blockSize), 1, 1);
-
-    // Debug - check if root has boids
-    if (Time.frameCount % 120 == 0) {
-        QuadNode[] rootNode = new QuadNode[1];
-        quadNodesBuffer.GetData(rootNode, 0, 0, 1);
-        Debug.Log($"Root node count: {rootNode[0].count}, flags: {rootNode[0].flags}");
-    }
-
-    // Step 5: Iterative subdivision and redistribution
-    for (int i = 0; i < maxQuadTreeDepth; i++)
+    // Approach 1: Use a single unified kernel (most efficient, but may not work on all platforms)
+    if (useUnifiedKernel && buildUnifiedKernel >= 0)
     {
-        // Subdivide nodes that need it
-        quadTreeShader.Dispatch(subdivideNodesKernel, Mathf.CeilToInt(MaxQuadNodes / blockSize), 1, 1);
+        // CRITICAL FIX: We need to make sure the root is a leaf node again before rebuilding
+        // Use a special kernel just for fixing the root node
+        int resetRootKernel = quadTreeShader.FindKernel("ResetRootNode");
+        if (resetRootKernel >= 0) {
+            quadTreeShader.SetBuffer(resetRootKernel, "quadNodes", quadNodesBuffer);
+            quadTreeShader.SetFloat("worldSize", initialQuadTreeSize);
+            quadTreeShader.Dispatch(resetRootKernel, 1, 1, 1);
+        }
+
+        // Set all needed buffers
+        quadTreeShader.SetBuffer(buildUnifiedKernel, "boids", boidBuffer);
+        quadTreeShader.SetBuffer(buildUnifiedKernel, "boidsOut", boidBufferOut);
+        quadTreeShader.SetBuffer(buildUnifiedKernel, "quadNodes", quadNodesBuffer);
+        quadTreeShader.SetBuffer(buildUnifiedKernel, "nodeCount", nodeCountBuffer);
+        quadTreeShader.SetBuffer(buildUnifiedKernel, "activeNodes", activeNodesBuffer);
+        quadTreeShader.SetBuffer(buildUnifiedKernel, "activeNodeCount", activeNodeCountBuffer);
+        quadTreeShader.SetBuffer(buildUnifiedKernel, "boidIndices", boidIndicesBuffer);
+        quadTreeShader.SetBuffer(buildUnifiedKernel, "nodeCounts", nodeCountsBuffer);
+        quadTreeShader.SetInt("maxBoidsPerNode", maxBoidsPerNode);
+        quadTreeShader.SetInt("numBoids", numBoids);
+        quadTreeShader.SetFloat("worldSize", initialQuadTreeSize);
+
+        // Single dispatch for the entire tree building process
+        quadTreeShader.Dispatch(buildUnifiedKernel, Mathf.Max(1, Mathf.CeilToInt(numBoids / 256f)), 1, 1);
         
-        // Redistribute boids to child nodes
-        quadTreeShader.Dispatch(redistributeBoidsKernel, Mathf.CeilToInt(numBoids / blockSize), 1, 1);
+        // Now run the simulation using the built quadtree
+        boidShader.SetBuffer(updateBoidsKernel, "boidsIn", boidBuffer);
+        boidShader.SetBuffer(updateBoidsKernel, "boidsOut", boidBufferOut);
+        boidShader.SetFloat("deltaTime", Time.deltaTime);
+        boidShader.SetInt("useQuadTree", 1);
+        boidShader.Dispatch(updateBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+    }
+    // Approach 2: Use fewer but separate kernel dispatches
+    else
+    {
+        // CRITICAL FIX: Reset the tree completely with a proper root node
+        quadTreeShader.SetBuffer(initializeTreeKernel, "quadNodes", quadNodesBuffer);
+        quadTreeShader.SetBuffer(initializeTreeKernel, "nodeCount", nodeCountBuffer);
+        quadTreeShader.SetBuffer(initializeTreeKernel, "activeNodes", activeNodesBuffer);
+        quadTreeShader.SetBuffer(initializeTreeKernel, "activeNodeCount", activeNodeCountBuffer);
+        quadTreeShader.SetBuffer(initializeTreeKernel, "nodeCounts", nodeCountsBuffer);
+        quadTreeShader.SetFloat("worldSize", initialQuadTreeSize);
+        quadTreeShader.Dispatch(initializeTreeKernel, 1, 1, 1);
+
+        // Insert boids into quadtree - make sure to set numBoids for the shader
+        quadTreeShader.SetBuffer(insertBoidsKernel, "boids", boidBuffer);
+        quadTreeShader.SetBuffer(insertBoidsKernel, "boidIndices", boidIndicesBuffer);
+        quadTreeShader.SetBuffer(insertBoidsKernel, "nodeCounts", nodeCountsBuffer);
+        quadTreeShader.SetInt("numBoids", numBoids);
+        quadTreeShader.Dispatch(insertBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
         
         // Update node counts
-        quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / blockSize), 1, 1);
+        quadTreeShader.SetBuffer(updateNodeCountsKernel, "quadNodes", quadNodesBuffer);
+        quadTreeShader.SetBuffer(updateNodeCountsKernel, "nodeCounts", nodeCountsBuffer);
+        quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
         
-        // Debug check - only periodically to avoid spam
-        if (Time.frameCount % 120 == 0 && i == maxQuadTreeDepth - 1) {
-            uint[] activeNodeCountDebug = new uint[1];
-            activeNodeCountBuffer.GetData(activeNodeCountDebug);
-            Debug.Log($"Active nodes after iteration {i}: {activeNodeCountDebug[0]}");
-            
-            // Check if we have child nodes
-            if (activeNodeCountDebug[0] > 1) {
-                uint[] firstFewActiveNodes = new uint[Math.Min(5, (int)activeNodeCountDebug[0])];
-                activeNodesBuffer.GetData(firstFewActiveNodes, 0, 0, firstFewActiveNodes.Length);
+        // OPTIMIZATION 3: Use fewer iterations with combined subdivide and redistribute
+        if (subdivideAndRedistributeKernel >= 0) {
+            // If we have the combined kernel, use it for fewer dispatches
+            int iterations = Mathf.Min(3, maxQuadTreeDepth);
+            for (int i = 0; i < iterations; i++) {
+                quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boids", boidBuffer);
+                quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "quadNodes", quadNodesBuffer);
+                quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "nodeCount", nodeCountBuffer);
+                quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "activeNodes", activeNodesBuffer);
+                quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "activeNodeCount", activeNodeCountBuffer);
+                quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boidIndices", boidIndicesBuffer);
+                quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "nodeCounts", nodeCountsBuffer);
+                quadTreeShader.SetInt("numBoids", numBoids);
                 
-                string nodeStr = string.Join(", ", firstFewActiveNodes);
-                Debug.Log($"First few active nodes: {nodeStr}");
+                // Dispatch with enough threads for both operations
+                int threadGroups = Mathf.Max(
+                    Mathf.CeilToInt(numBoids / 256f),
+                    Mathf.CeilToInt(MaxQuadNodes / 256f)
+                );
+                quadTreeShader.Dispatch(subdivideAndRedistributeKernel, threadGroups, 1, 1);
                 
-                // Check a sample of nodes
-                QuadNode[] sampleNodes = new QuadNode[firstFewActiveNodes.Length];
-                for (int n = 0; n < firstFewActiveNodes.Length; n++) {
-                    uint nodeIdx = firstFewActiveNodes[n];
-                    quadNodesBuffer.GetData(sampleNodes, (int)nodeIdx, (int)nodeIdx, 1);
+                // Clear and update node counts after each iteration
+                quadTreeShader.Dispatch(clearNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+                
+                // CRITICAL FIX: We need to recount all boids after redistribution
+                
+                if (recountBoidsKernel >= 0) {
+                    quadTreeShader.SetBuffer(recountBoidsKernel, "boidIndices", boidIndicesBuffer);
+                    quadTreeShader.SetBuffer(recountBoidsKernel, "nodeCounts", nodeCountsBuffer);
+                    quadTreeShader.SetInt("numBoids", numBoids);
+                    quadTreeShader.Dispatch(recountBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
                 }
                 
-                // Log sample node info
-                for (int n = 0; n < sampleNodes.Length; n++) {
-                    Debug.Log($"Node {firstFewActiveNodes[n]}: Count={sampleNodes[n].count}, " +
-                             $"StartIndex={sampleNodes[n].startIndex}, Flags={sampleNodes[n].flags}");
-                }
+                // Update node counts after recounting
+                quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+            }
+        }
+        
+        // After updating node counts, apply a final redistribution
+        int forceRedistributeKernel = quadTreeShader.FindKernel("ForceRedistributeRootBoids");
+        quadTreeShader.SetBuffer(forceRedistributeKernel, "boids", boidBuffer);
+        quadTreeShader.SetBuffer(forceRedistributeKernel, "boidIndices", boidIndicesBuffer);
+        quadTreeShader.SetBuffer(forceRedistributeKernel, "quadNodes", quadNodesBuffer);
+        quadTreeShader.SetBuffer(forceRedistributeKernel, "nodeCounts", nodeCountsBuffer);
+        quadTreeShader.SetInt("numBoids", numBoids);
+        quadTreeShader.Dispatch(forceRedistributeKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+
+        // CRITICAL FIX: Recount boids once more after final redistribution
+        //int recountBoidsKernel = quadTreeShader.FindKernel("RecountBoids");
+        if (recountBoidsKernel >= 0) {
+            quadTreeShader.SetBuffer(recountBoidsKernel, "boidIndices", boidIndicesBuffer);
+            quadTreeShader.SetBuffer(recountBoidsKernel, "nodeCounts", nodeCountsBuffer);
+            quadTreeShader.SetInt("numBoids", numBoids);
+            quadTreeShader.Dispatch(recountBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+        }
+
+        // Update node counts again
+        quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+        
+        // Sort boids according to quadtree
+        quadTreeShader.SetBuffer(sortBoidsKernel, "boids", boidBuffer);
+        quadTreeShader.SetBuffer(sortBoidsKernel, "boidsOut", boidBufferOut);
+        quadTreeShader.SetBuffer(sortBoidsKernel, "boidIndices", boidIndicesBuffer);
+        quadTreeShader.SetInt("numBoids", numBoids);
+        quadTreeShader.Dispatch(sortBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+        
+        // Swap buffers to get sorted boids
+        var temp = boidBuffer;
+        boidBuffer = boidBufferOut;
+        boidBufferOut = temp;
+        
+        // Run the boid update
+        boidShader.SetBuffer(updateBoidsKernel, "boidsIn", boidBuffer);
+        boidShader.SetBuffer(updateBoidsKernel, "boidsOut", boidBufferOut);
+        boidShader.SetFloat("deltaTime", Time.deltaTime);
+        boidShader.SetInt("useQuadTree", 1);
+        boidShader.Dispatch(updateBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+    }
+    
+    // Final buffer swap after boid update
+    var finalTemp = boidBuffer;
+    boidBuffer = boidBufferOut;
+    boidBufferOut = finalTemp;
+
+    DebugPrintQuadTreeInfo();
+}
+
+private void AnalyzeQuadTreeBoidDistribution()
+{
+    if (!useQuadTree || quadNodesBuffer == null || boidIndicesBuffer == null)
+        return;
+    
+    // Step 1: Read basic information
+    uint[] counts = new uint[1];
+    nodeCountBuffer.GetData(counts);
+    int nodeCount = (int)counts[0];
+    
+    // Step 2: Read the node data
+    QuadNode[] allNodes = new QuadNode[nodeCount];
+    quadNodesBuffer.GetData(allNodes, 0, 0, nodeCount);
+    
+    // Step 3: Read a sample of boid-to-node assignments to verify distribution
+    int sampleSize = Mathf.Min(numBoids, 1000);
+    uint[] boidNodeAssignments = new uint[sampleSize * 2];
+    boidIndicesBuffer.GetData(boidNodeAssignments, 0, 0, sampleSize * 2);
+    
+    // Step 4: Count boids in each node by examining assignments
+    Dictionary<uint, int> actualBoidsPerNode = new Dictionary<uint, int>();
+    for (int i = 0; i < sampleSize; i++)
+    {
+        uint nodeIdx = boidNodeAssignments[i * 2 + 1];
+        if (!actualBoidsPerNode.ContainsKey(nodeIdx))
+            actualBoidsPerNode[nodeIdx] = 0;
+        actualBoidsPerNode[nodeIdx]++;
+    }
+    
+    // Step 5: Compare with reported counts
+    Debug.Log($"=== DETAILED BOID DISTRIBUTION ANALYSIS ===");
+    Debug.Log($"Sampling {sampleSize} of {numBoids} boids");
+    Debug.Log("Node\tReported\tSampled\tDifference");
+    Debug.Log("---------------------------------------");
+    
+    int totalSampled = 0;
+    foreach (var kvp in actualBoidsPerNode)
+    {
+        uint nodeIdx = kvp.Key;
+        int sampledCount = kvp.Value;
+        totalSampled += sampledCount;
+        
+        // Get the reported count from the node structure
+        int reportedCount = nodeIdx < nodeCount ? (int)allNodes[nodeIdx].count : 0;
+        
+        // Calculate scaled reported count based on sample size
+        float scaledReported = reportedCount * (sampleSize / (float)numBoids);
+        
+        Debug.Log($"{nodeIdx}\t{reportedCount}\t{sampledCount}\t{sampledCount - scaledReported:F1}");
+    }
+    
+    Debug.Log($"Total sampled: {totalSampled} (should be {sampleSize})");
+    
+    // Step 6: Analyze boid indices to check for any anomalies
+    HashSet<uint> uniqueBoidIndices = new HashSet<uint>();
+    for (int i = 0; i < sampleSize; i++)
+    {
+        uniqueBoidIndices.Add(boidNodeAssignments[i * 2]);
+    }
+    
+    Debug.Log($"Unique boid indices: {uniqueBoidIndices.Count} (should be {sampleSize})");
+    if (uniqueBoidIndices.Count < sampleSize)
+    {
+        Debug.LogWarning("Some boids appear multiple times in the assignment list!");
+    }
+    
+    // Step 7: Validate the quadtree structure
+    Debug.Log("\n=== QUADTREE STRUCTURE VALIDATION ===");
+    
+    // Check if root node is properly set
+    bool rootIsLeaf = (allNodes[0].flags & NODE_LEAF) != 0;
+    bool rootHasChildren = allNodes[0].childIndex > 0 && allNodes[0].childIndex < nodeCount;
+    bool rootChildrenAreLeaves = true;
+    
+    if (rootHasChildren)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            int childIdx = (int)allNodes[0].childIndex + i;
+            if (childIdx < nodeCount)
+            {
+                bool isLeaf = (allNodes[childIdx].flags & NODE_LEAF) != 0;
+                if (!isLeaf) rootChildrenAreLeaves = false;
             }
         }
     }
+    
+    Debug.Log($"Root node is leaf: {rootIsLeaf}");
+    Debug.Log($"Root has valid children: {rootHasChildren}");
+    if (rootHasChildren)
+    {
+        Debug.Log($"Root's children are leaves: {rootChildrenAreLeaves}");
+    }
+    
+    // Step 8: Check for orphaned nodes or invalid child indices
+    int nodesWithInvalidChildren = 0;
+    for (int i = 0; i < nodeCount; i++)
+    {
+        if ((allNodes[i].flags & NODE_LEAF) == 0 && allNodes[i].childIndex > 0)
+        {
+            if (allNodes[i].childIndex >= nodeCount || allNodes[i].childIndex + 3 >= nodeCount)
+            {
+                nodesWithInvalidChildren++;
+                Debug.LogWarning($"Node {i} has invalid child index: {allNodes[i].childIndex}");
+            }
+        }
+    }
+    
+    Debug.Log($"Nodes with invalid children: {nodesWithInvalidChildren}");
+}
 
-    // Step 6: Sort boids according to the quadtree
-    quadTreeShader.Dispatch(sortBoidsKernel, Mathf.CeilToInt(numBoids / blockSize), 1, 1);
+private void DebugSubdivisionIssues()
+{
+    // Create debug buffer if it doesn't exist
+    if (subdivDebugBuffer == null)
+    {
+        subdivDebugBuffer = new ComputeBuffer(10, 4); // 10 uint values
+    }
+    
+    // Find debug kernel
+    int debugSubdivKernel = quadTreeShader.FindKernel("DebugSubdivision");
+    
+    // Set buffers
+    quadTreeShader.SetBuffer(debugSubdivKernel, "quadNodes", quadNodesBuffer);
+    quadTreeShader.SetBuffer(debugSubdivKernel, "nodeCount", nodeCountBuffer);
+    quadTreeShader.SetBuffer(debugSubdivKernel, "activeNodeCount", activeNodeCountBuffer);
+    
+    quadTreeShader.SetInt("maxBoidsPerNode", maxBoidsPerNode);
+    quadTreeShader.SetBuffer(debugSubdivKernel, "subdivDebug", subdivDebugBuffer);
 
-    // Swap buffers
-    var temp = boidBuffer;
-    boidBuffer = boidBufferOut;
-    boidBufferOut = temp;
+    // Dispatch
+    quadTreeShader.Dispatch(debugSubdivKernel, 1, 1, 1);
+    
+    // Read back data
+    uint[] debugData = new uint[10];
+    subdivDebugBuffer.GetData(debugData);
+    
+    // Analyze results
+    Debug.Log($"Subdivision Debug:");
+    Debug.Log($"Root flags: {debugData[0]} (Has LEAF bit: {(debugData[7] == 1 ? "Yes" : "No")})");
+    Debug.Log($"Root count: {debugData[1]} (Exceeds threshold of {debugData[5]}: {(debugData[8] == 1 ? "Yes" : "No")})");
+    Debug.Log($"Node count: {debugData[2]} (Room for children: {(debugData[9] == 1 ? "Yes" : "No")})");
+    Debug.Log($"Root size: {debugData[4]}");
+    Debug.Log($"Active nodes: {debugData[6]}");
+    
+    // Check if ALL conditions pass
+    bool shouldSubdivide = debugData[7] == 1 && debugData[8] == 1 && debugData[9] == 1;
+    Debug.Log($"Should root subdivide? {(shouldSubdivide ? "YES" : "NO - subdivision blocked")}");
+    
+    // Read actual parameters
+    uint[] maxBoidsPerNodeArr = new uint[1];
+    ComputeBuffer tempBuffer = new ComputeBuffer(1, 4);
+    quadTreeShader.SetBuffer(debugSubdivKernel, "maxBoidsPerNodeCheck", tempBuffer);
+    quadTreeShader.Dispatch(debugSubdivKernel, 1, 1, 1);
+    tempBuffer.GetData(maxBoidsPerNodeArr);
+    tempBuffer.Release();
 
-    // Update shader buffers
-    boidShader.SetBuffer(updateBoidsKernel, "boidsIn", boidBuffer);
-    boidShader.SetBuffer(updateBoidsKernel, "boidsOut", boidBufferOut);
-
-    // Use quadtree for boid calculations
-    boidShader.SetInt("useQuadTree", 1);
-    boidShader.Dispatch(updateBoidsKernel, Mathf.CeilToInt(numBoids / blockSize), 1, 1);
+    ComputeBuffer testBuffer = new ComputeBuffer(1, 4);
+    int testKernel = quadTreeShader.FindKernel("TestMaxBoidsPerNode");
+    quadTreeShader.SetBuffer(testKernel, "testBuffer", testBuffer);
+    quadTreeShader.SetInt("maxBoidsPerNode", maxBoidsPerNode);
+    quadTreeShader.Dispatch(testKernel, 1, 1, 1);
+    
+    uint[] result = new uint[1];
+    testBuffer.GetData(result);
+    Debug.Log($"Direct test - maxBoidsPerNode in shader: {result[0]}");
+    
+    testBuffer.Release();
+    
+    Debug.Log($"maxBoidsPerNode value in shader: {maxBoidsPerNodeArr[0]} (C# value: {maxBoidsPerNode})");
 }
 
   // Start is called before the first frame update
@@ -282,6 +731,10 @@ private void UpdateQuadTree()
 
 
     // Get kernel IDs
+    initializeTreeKernel = quadTreeShader.FindKernel("InitializeQuadTree");
+    buildUnifiedKernel = quadTreeShader.FindKernel("BuildQuadtreeUnified");
+    subdivideAndRedistributeKernel = quadTreeShader.FindKernel("SubdivideAndRedistribute"); 
+
     updateBoidsKernel = boidShader.FindKernel("UpdateBoids");
     generateBoidsKernel = boidShader.FindKernel("GenerateBoids");
     updateGridKernel = gridShader.FindKernel("UpdateGrid");
@@ -352,14 +805,15 @@ private void UpdateQuadTree()
     {
 		Debug.LogWarning("Quad Tree Shader is not null.");
         // Find kernels
+        recountBoidsKernel = quadTreeShader.FindKernel("RecountBoids");
         clearQuadTreeKernel = quadTreeShader.FindKernel("ClearQuadTree");
         insertBoidsKernel = quadTreeShader.FindKernel("InsertBoids");
-        buildActiveNodesKernel = quadTreeShader.FindKernel("BuildActiveNodes");
+        //buildActiveNodesKernel = quadTreeShader.FindKernel("BuildActiveNodes");
         sortBoidsKernel = quadTreeShader.FindKernel("SortBoids");
-		subdivideNodesKernel = quadTreeShader.FindKernel("SubdivideNodes");
+		//subdivideNodesKernel = quadTreeShader.FindKernel("SubdivideNodes");
         
         clearNodeCountsKernel = quadTreeShader.FindKernel("ClearNodeCounts");
-        redistributeBoidsKernel = quadTreeShader.FindKernel("RedistributeBoids");
+        //redistributeBoidsKernel = quadTreeShader.FindKernel("RedistributeBoids");
         updateNodeCountsKernel = quadTreeShader.FindKernel("UpdateNodeCounts");
 
 
@@ -418,12 +872,49 @@ private void UpdateQuadTree()
         quadTreeShader.SetBuffer(sumNodeCountsKernel, "quadNodes", quadNodesBuffer);
         quadTreeShader.SetBuffer(sumNodeCountsKernel, "boidIndices", boidIndicesBuffer);
         quadTreeShader.SetInt("numBoids", numBoids);
+
+        if (initializeTreeKernel >= 0)
+        {
+            quadTreeShader.SetBuffer(initializeTreeKernel, "quadNodes", quadNodesBuffer);
+            quadTreeShader.SetBuffer(initializeTreeKernel, "nodeCount", nodeCountBuffer);
+            quadTreeShader.SetBuffer(initializeTreeKernel, "activeNodes", activeNodesBuffer);
+            quadTreeShader.SetBuffer(initializeTreeKernel, "activeNodeCount", activeNodeCountBuffer);
+            quadTreeShader.SetBuffer(initializeTreeKernel, "nodeCounts", nodeCountsBuffer);
+        }
+        
+        if (buildUnifiedKernel >= 0)
+        {
+            quadTreeShader.SetBuffer(buildUnifiedKernel, "quadNodes", quadNodesBuffer);
+            quadTreeShader.SetBuffer(buildUnifiedKernel, "nodeCount", nodeCountBuffer);
+            quadTreeShader.SetBuffer(buildUnifiedKernel, "activeNodes", activeNodesBuffer);
+            quadTreeShader.SetBuffer(buildUnifiedKernel, "activeNodeCount", activeNodeCountBuffer);
+            quadTreeShader.SetBuffer(buildUnifiedKernel, "boidIndices", boidIndicesBuffer);
+            quadTreeShader.SetBuffer(buildUnifiedKernel, "nodeCounts", nodeCountsBuffer);
+            quadTreeShader.SetBuffer(buildUnifiedKernel, "boids", boidBuffer);
+            quadTreeShader.SetBuffer(buildUnifiedKernel, "boidsOut", boidBufferOut);
+            quadTreeShader.SetInt("numBoids", numBoids);
+            quadTreeShader.SetInt("maxDepth", maxQuadTreeDepth);
+            quadTreeShader.SetInt("maxBoidsPerNode", maxBoidsPerNode);
+            quadTreeShader.SetFloat("worldSize", initialQuadTreeSize);
+        }
+        
+        if (subdivideAndRedistributeKernel >= 0)
+        {
+            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "quadNodes", quadNodesBuffer);
+            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "nodeCount", nodeCountBuffer);
+            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "activeNodes", activeNodesBuffer);
+            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "activeNodeCount", activeNodeCountBuffer);
+            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boidIndices", boidIndicesBuffer);
+            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "nodeCounts", nodeCountsBuffer);
+            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boids", boidBuffer);
+            quadTreeShader.SetInt("maxBoidsPerNode", maxBoidsPerNode);
+        }
         
         // Set buffers
-		quadTreeShader.SetBuffer(subdivideNodesKernel, "quadNodes", quadNodesBuffer);
-		quadTreeShader.SetBuffer(subdivideNodesKernel, "nodeCount", nodeCountBuffer);
-		quadTreeShader.SetBuffer(subdivideNodesKernel, "activeNodes", activeNodesBuffer);
-		quadTreeShader.SetBuffer(subdivideNodesKernel, "activeNodeCount", activeNodeCountBuffer);
+		//quadTreeShader.SetBuffer(subdivideNodesKernel, "quadNodes", quadNodesBuffer);
+		//quadTreeShader.SetBuffer(subdivideNodesKernel, "nodeCount", nodeCountBuffer);
+		//quadTreeShader.SetBuffer(subdivideNodesKernel, "activeNodes", activeNodesBuffer);
+		//quadTreeShader.SetBuffer(subdivideNodesKernel, "activeNodeCount", activeNodeCountBuffer);
 
         quadTreeShader.SetBuffer(clearQuadTreeKernel, "quadNodes", quadNodesBuffer);
         quadTreeShader.SetBuffer(clearQuadTreeKernel, "nodeCount", nodeCountBuffer);
@@ -435,10 +926,10 @@ private void UpdateQuadTree()
         quadTreeShader.SetBuffer(insertBoidsKernel, "nodeCount", nodeCountBuffer);
 		quadTreeShader.SetBuffer(insertBoidsKernel, "boidIndices", boidIndicesBuffer);
         
-        quadTreeShader.SetBuffer(buildActiveNodesKernel, "quadNodes", quadNodesBuffer);
-        quadTreeShader.SetBuffer(buildActiveNodesKernel, "nodeCount", nodeCountBuffer);
-        quadTreeShader.SetBuffer(buildActiveNodesKernel, "activeNodes", activeNodesBuffer);
-        quadTreeShader.SetBuffer(buildActiveNodesKernel, "activeNodeCount", activeNodeCountBuffer);
+        //quadTreeShader.SetBuffer(buildActiveNodesKernel, "quadNodes", quadNodesBuffer);
+        //quadTreeShader.SetBuffer(buildActiveNodesKernel, "nodeCount", nodeCountBuffer);
+        //quadTreeShader.SetBuffer(buildActiveNodesKernel, "activeNodes", activeNodesBuffer);
+        //quadTreeShader.SetBuffer(buildActiveNodesKernel, "activeNodeCount", activeNodeCountBuffer);
         
         quadTreeShader.SetBuffer(sortBoidsKernel, "boids", boidBuffer);
         quadTreeShader.SetBuffer(sortBoidsKernel, "boidsOut", boidBufferOut);
@@ -446,9 +937,9 @@ private void UpdateQuadTree()
         quadTreeShader.SetBuffer(sortBoidsKernel, "boidIndices", boidIndicesBuffer);
 		quadTreeShader.SetBuffer(sortBoidsKernel, "nodeCount", nodeCountBuffer);
             
-        quadTreeShader.SetBuffer(redistributeBoidsKernel, "boids", boidBuffer);
-        quadTreeShader.SetBuffer(redistributeBoidsKernel, "boidIndices", boidIndicesBuffer);
-        quadTreeShader.SetBuffer(redistributeBoidsKernel, "quadNodes", quadNodesBuffer);
+        //quadTreeShader.SetBuffer(redistributeBoidsKernel, "boids", boidBuffer);
+        //quadTreeShader.SetBuffer(redistributeBoidsKernel, "boidIndices", boidIndicesBuffer);
+        //quadTreeShader.SetBuffer(redistributeBoidsKernel, "quadNodes", quadNodesBuffer);
 
         quadTreeShader.SetBuffer(updateNodeCountsKernel, "nodeCounts", nodeCountsBuffer);
         quadTreeShader.SetBuffer(updateNodeCountsKernel, "quadNodes", quadNodesBuffer);
@@ -578,36 +1069,40 @@ private void CheckBuffersValid()
 // Add this method to Main2D.cs to debug the quad-tree
 void OnDrawGizmos()
 {
-    if (!Application.isPlaying || !useQuadTree) return;
+    // Only draw if:
+    // 1. We're in the editor
+    // 2. The game is playing
+    // 3. Visualization is explicitly enabled
+    // 4. Quadtree is being used
+    if (!Application.isPlaying || !drawQuadTreeGizmos || !useQuadTree || quadNodesBuffer == null) 
+        return;
     
-    // Read the entire quad tree structure
-    QuadNode[] allNodes = new QuadNode[MaxQuadNodes];
-    quadNodesBuffer.GetData(allNodes);
+    // Don't try to visualize if the buffer hasn't been created yet
+    if (quadNodesBuffer == null || quadNodesBuffer.count == 0)
+        return;
     
-    // Read node count to know how many nodes exist
+    // Limit how many nodes we'll read back
     uint[] counts = new uint[1];
     nodeCountBuffer.GetData(counts);
-    uint nodeCount = counts[0];
-
-	uint[] activeNodeCount = new uint[1];
-	activeNodeCountBuffer.GetData(activeNodeCount);
-	Debug.Log($"Active node count: {activeNodeCount[0]}");
-
-	if (activeNodeCount[0] > 0) {
-    	uint[] activeNodeData = new uint[Mathf.Min(10, (int)activeNodeCount[0])];
-    	activeNodesBuffer.GetData(activeNodeData);
-    	Debug.Log($"First active node: {activeNodeData[0]}");
-	}
+    int nodeCount = (int)Mathf.Min(counts[0], MaxQuadNodes);
     
-    Debug.Log($"Total quad tree nodes: {nodeCount}");
+    // If there are no nodes or too many, skip visualization
+    if (nodeCount <= 0 || nodeCount > 1000) 
+        return;
     
-    // Visualize all nodes up to a certain depth
+    // Read just enough nodes, not the entire buffer
+    QuadNode[] allNodes = new QuadNode[nodeCount];
+    quadNodesBuffer.GetData(allNodes, 0, 0, nodeCount);
+    
+    // Just visualize the root node and immediate children
     DrawQuadNodeWithInfo(allNodes, 0, 0, Color.green);
 }
 
 void DrawQuadNodeWithInfo(QuadNode[] allNodes, uint nodeIndex, int depth, Color color)
 {
-    if (depth > 4 || nodeIndex >= allNodes.Length) return;
+    // Early out if we've reached our detail limit
+    if (depth > gizmoDetailLevel || nodeIndex >= allNodes.Length) 
+        return;
     
     QuadNode node = allNodes[nodeIndex];
     
@@ -617,11 +1112,10 @@ void DrawQuadNodeWithInfo(QuadNode[] allNodes, uint nodeIndex, int depth, Color 
     Vector3 size = new Vector3(node.size * 2, node.size * 2, 0.1f);
     Gizmos.DrawWireCube(center, size);
     
-    // Display node info
-    bool isLeaf = (node.flags & 1) != 0;
+    // Display node info based on boid count
     int boidCount = (int)node.count;
     
-    // Color code based on number of boids
+    // Only draw filled boxes for nodes with boids
     if (boidCount > 0)
     {
         // Use a color gradient based on boid count
@@ -630,18 +1124,30 @@ void DrawQuadNodeWithInfo(QuadNode[] allNodes, uint nodeIndex, int depth, Color 
         Gizmos.color = fillColor;
         Gizmos.DrawCube(center, size);
         
-        // Show node counts as text in the scene
-        UnityEditor.Handles.Label(center, $"Node {nodeIndex}: {boidCount} boids\nLeaf: {isLeaf}");
+        // Only draw labels for important nodes to reduce clutter
+        if (boidCount > maxBoidsPerNode / 2 || depth <= 1)
+        {
+            // Use handles for text in the editor only
+            #if UNITY_EDITOR
+            UnityEditor.Handles.Label(center, $"Node {nodeIndex}: {boidCount}");
+            #endif
+        }
     }
     
-    // Draw children if not a leaf
-    if (!isLeaf && node.childIndex > 0)
+    // Draw children if not a leaf and has valid children
+    if ((node.flags & NODE_LEAF) == 0 && node.childIndex > 0 && node.childIndex < allNodes.Length)
     {
         // Alternate colors for child nodes
         Color childColor = new Color(color.r * 0.8f, color.g * 0.8f, color.b * 0.8f);
+        
+        // Draw each child, with bounds checking
         for (uint i = 0; i < 4; i++)
         {
-            DrawQuadNodeWithInfo(allNodes, node.childIndex + i, depth + 1, childColor);
+            uint childIdx = node.childIndex + i;
+            if (childIdx < allNodes.Length)
+            {
+                DrawQuadNodeWithInfo(allNodes, childIdx, depth + 1, childColor);
+            }
         }
     }
 }

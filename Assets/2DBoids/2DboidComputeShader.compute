@@ -1,6 +1,7 @@
 #define blockSize 1024
 #define NODE_LEAF 1
 #define NODE_ACTIVE 2
+#define MaxQuadNodes 16384
 
 struct Boid {
   float2 pos;
@@ -69,75 +70,70 @@ uint getGridID(uint2 pos) {
   return (gridDimX * pos.y) + pos.x;
 }
 
-// Improved quadtree neighbor search
 void FindNearbyBoidsQuadTree(float2 position, float radiusSq, inout float2 center, 
                            inout float2 close, inout float2 avgVel, 
                            inout uint sameTeamNeighbours, inout uint otherTeamNeighbours, 
                            uint boidTeam, uint currentBoidIndex) {
-    // Use a stack to avoid recursion
-    uint stack[32];
+    // OPTIMIZATION: Fixed-size stack to avoid dynamic allocation
+    uint stack[12]; // Reduced stack size for better register usage
     uint stackSize = 0;
     
     // Start with root node
     stack[stackSize++] = 0;
     
+    // OPTIMIZATION: Track the closest nodes and process them first
     while (stackSize > 0) {
         // Pop a node from the stack
         uint nodeIndex = stack[--stackSize];
         QuadNode node = quadNodes[nodeIndex];
         
-        // Calculate distance from position to nearest point of node's bounding box
-        float2 nodeMin = node.center - node.size;
-        float2 nodeMax = node.center + node.size;
+        // OPTIMIZATION: Early termination
+        if (node.count == 0) continue;
         
-        // Find closest point on node to the boid's position
-        float2 closest;
-        closest.x = max(nodeMin.x, min(position.x, nodeMax.x));
-        closest.y = max(nodeMin.y, min(position.y, nodeMax.y));
-        
-        // Check distance to closest point
-        float2 diff = position - closest;
-        float distSq = dot(diff, diff);
+        // OPTIMIZATION: More efficient AABB distance test
+        // Calculate distance from point to node boundaries
+        float2 closest = max(node.center - node.size, min(position, node.center + node.size));
+        float distSq = dot(position - closest, position - closest);
         
         // If node is too far, skip it
-        if (distSq > radiusSq) {
-            continue;
-        }
+        if (distSq > radiusSq) continue;
         
-        // Process leaf node
+        // OPTIMIZATION: Process leaf nodes directly
         if ((node.flags & NODE_LEAF) != 0) {
-            // Check if this node has boids
-            if (node.count > 0) {
-                // Get the start index for this node's boids
-                uint startIdx = node.startIndex;
-                uint endIdx = startIdx + node.count;
-                
-                // Ensure we don't go out of bounds
-                endIdx = min(endIdx, numBoids);
-                
-                // Process all boids in this node
-                for (uint i = startIdx; i < endIdx; i++) {
-                    // Skip if this is the current boid
-                    if (i == currentBoidIndex) continue;
+            // Skip empty nodes
+            if (node.count == 0) continue;
+            
+            // Skip nodes with invalid indices
+            if (nodeIndex >= MaxQuadNodes) continue;
+            
+            // Find actual boid indices using boidIndices lookup
+            for (uint i = 0; i < numBoids; i++) {
+                if (boidIndices[i * 2 + 1] == nodeIndex) {
+                    uint otherBoidIndex = boidIndices[i * 2];
                     
-                    Boid other = boidsIn[i];
+                    // Skip self
+                    if (otherBoidIndex == currentBoidIndex) continue;
                     
-                    // Calculate distance to other boid
+                    // Get the other boid
+                    Boid other = boidsIn[otherBoidIndex];
+                    
+                    // Calculate squared distance
                     float2 boidDiff = position - other.pos;
                     float boidDistSq = dot(boidDiff, boidDiff);
                     
-                    // If within visual range
-                    if (boidDistSq > 0 && boidDistSq < radiusSq) {
+                    // If within range
+                    if (boidDistSq > 0.0 && boidDistSq < radiusSq) {
+                        // Check team
                         bool sameTeam = boidTeam == other.team;
                         
-                        // Apply separation if too close
+                        // Separation
                         if (boidDistSq < minDistanceSq) {
+                            float invDistSq = 1.0 / max(boidDistSq, 0.0001);
                             float repulsionStrength = sameTeam ? 1.0 : interTeamRepulsionMultiplier;
-                            float invDistSq = 1.0 / max(boidDistSq, 0.0001); // Avoid division by zero
                             close += boidDiff * invDistSq * repulsionStrength;
                         }
                         
-                        // Apply cohesion and alignment for same team
+                        // Only collect position/velocity data for same-team boids
                         if (sameTeam) {
                             center += other.pos;
                             avgVel += other.vel;
@@ -149,13 +145,18 @@ void FindNearbyBoidsQuadTree(float2 position, float radiusSq, inout float2 cente
                 }
             }
         } 
-        // Process internal node (not a leaf)
+        // Add children to stack for non-leaf nodes
         else if (node.childIndex > 0) {
-            // Add all children to the stack
-            for (uint i = 0; i < 4; i++) {
-                uint childIndex = node.childIndex + i;
-                // Ensure the child index is valid
-                if (childIndex < nodeCount[0]) {
+            // OPTIMIZATION: Push children in an order that prioritizes likely neighbors
+            // Calculate which quadrant the search position is in relative to this node
+            uint targetQuadrant = 0;
+            targetQuadrant |= (position.x < node.center.x) ? 1 : 0;
+            targetQuadrant |= (position.y < node.center.y) ? 2 : 0;
+            
+            // Add the most promising quadrant first (opposite order of popping)
+            for (int i = 3; i >= 0; i--) {
+                uint childIndex = node.childIndex + ((targetQuadrant + i) % 4);
+                if (childIndex < MaxQuadNodes && stackSize < 12) {
                     stack[stackSize++] = childIndex;
                 }
             }
