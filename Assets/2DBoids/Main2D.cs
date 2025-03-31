@@ -977,7 +977,7 @@ private void DebugSubdivisionIssues()
     rp.worldBounds = new Bounds(Vector3.zero, Vector3.one * 3000);
     trianglePositions = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 3, 8);
     trianglePositions.SetData(triangleVerts);
-    rp.matProps.SetBuffer("_Positions", trianglePositions);
+    rp.matProps.SetBuffer("_Positions", triangslePositions);
 
     // Spatial grid setup
     gridCellSize = visualRange;

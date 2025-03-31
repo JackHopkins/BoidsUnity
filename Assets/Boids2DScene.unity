@@ -155,6 +155,7 @@ GameObject:
   - component: {fileID: 519420033}
   - component: {fileID: 519420034}
   - component: {fileID: 519420035}
+  - component: {fileID: 519420036}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -261,6 +262,8 @@ MonoBehaviour:
   - {fileID: 1909174395}
   obstacleAvoidanceWeight: 5
   maxObstacles: 10
+  drawQuadTreeGizmos: 0
+  gizmoDetailLevel: 2
   fpsText: {fileID: 534247695}
   boidText: {fileID: 321516222}
   numSlider: {fileID: 671117610}
@@ -272,7 +275,7 @@ MonoBehaviour:
   maxQuadTreeDepth: 8
   maxBoidsPerNode: 32
   initialQuadTreeSize: 100
-  quadTreeShader: {fileID: 7200000, guid: ea6569df25b349d6abbbdbb9dba2b88c, type: 3}
+  quadTreeShader: {fileID: 7200000, guid: 45ed63be2cd24eefbcf212f1a5dd96c0, type: 3}
   teamRatio: 0.5
   intraTeamCohesionMultiplier: 1.5
   interTeamRepulsionMultiplier: 1.5
@@ -334,6 +337,37 @@ MonoBehaviour:
     m_MipBias: 0
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
+--- !u!114 &519420036
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 519420028}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a9dab7f1523047eca434f7ce9aa24499, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  metricsText: {fileID: 0}
+  graphContainer: {fileID: 0}
+  enableIncrementalToggle: {fileID: 0}
+  graphPointCount: 100
+  graphHeight: 60
+  movedBoidsColor:
+    r: 0
+    g: 0
+    b: 1
+    a: 1
+  updateTimeColor:
+    r: 0
+    g: 1
+    b: 0
+    a: 1
+  boidController: {fileID: 0}
+  movedBoidsHistory: 
+  updateTimeHistory: []
+  graphPoints: []
 --- !u!114 &534247695 stripped
 MonoBehaviour:
   m_CorrespondingSourceObject: {fileID: 7065921368030388633, guid: f375b6865fad84768a6b836e4948bfd5, type: 3}
