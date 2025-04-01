@@ -466,6 +466,7 @@ void GenerateBoids(uint3 id : SV_DispatchThreadID) {
   rngState = randSeed + id.x;
   boidsOut[id.x].pos = float2(randPCG(-xBound, xBound), randPCG(-yBound, yBound));
   boidsOut[id.x].vel = float2(randPCG(-maxSpeed, maxSpeed), randPCG(-maxSpeed, maxSpeed));
-  uint threshold = (uint)(numBoids * teamRatio);
-  boidsOut[id.x].team = id.x < threshold ? 0u : 1u;
+  // Use round-robin assignment for teams to ensure even distribution
+  // Even indices get team 0 (blue), odd indices get team 1 (red)
+  boidsOut[id.x].team = id.x % 2 == 0 ? 0u : 1u;
 }

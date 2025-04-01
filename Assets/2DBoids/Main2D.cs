@@ -41,7 +41,7 @@ namespace BoidsUnity
         [Header("Team Settings")]
         [SerializeField] float teamRatio = 0.5f;
         [SerializeField] float intraTeamCohesionMultiplier = 2.5f;
-        [SerializeField] float interTeamRepulsionMultiplier = 2.5f;
+        [SerializeField] float interTeamRepulsionMultiplier = 1.0f; // Reduced from 2.5f to allow teams to mix better
         [SerializeField] Color team0Color = Color.blue;
         [SerializeField] Color team1Color = Color.red;
         
@@ -187,7 +187,7 @@ namespace BoidsUnity
                     {
                         pos = pos,
                         vel = vel,
-                        team = (uint)(i < numBoids * teamRatio ? 0 : 1) // Assign team based on ratio
+                        team = (uint)(i % 2 == 0 ? 0 : 1) // Round-robin assignment (even=blue, odd=red)
                     };
                     boids[i] = boid;
                 }
