@@ -185,6 +185,7 @@ namespace BoidsUnity
             quadTreeShader.SetBuffer(sortBoidsKernel, "quadNodes", quadNodesBuffer);
             quadTreeShader.SetBuffer(sortBoidsKernel, "boidIndices", boidIndicesBuffer);
             quadTreeShader.SetBuffer(sortBoidsKernel, "nodeCount", nodeCountBuffer);
+            quadTreeShader.SetBuffer(sortBoidsKernel, "boidHistory", boidHistoryBuffer);
             
             quadTreeShader.SetBuffer(updateNodeCountsKernel, "nodeCounts", nodeCountsBuffer);
             quadTreeShader.SetBuffer(updateNodeCountsKernel, "quadNodes", quadNodesBuffer);
@@ -203,6 +204,7 @@ namespace BoidsUnity
                 quadTreeShader.SetBuffer(buildUnifiedKernel, "nodeCounts", nodeCountsBuffer);
                 quadTreeShader.SetBuffer(buildUnifiedKernel, "boids", boidBuffer);
                 quadTreeShader.SetBuffer(buildUnifiedKernel, "boidsOut", boidBufferOut);
+                quadTreeShader.SetBuffer(buildUnifiedKernel, "boidHistory", boidHistoryBuffer);
             }
             
             // Set buffers for subdivideAndRedistribute kernel if available
@@ -215,6 +217,7 @@ namespace BoidsUnity
                 quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boidIndices", boidIndicesBuffer);
                 quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "nodeCounts", nodeCountsBuffer);
                 quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boids", boidBuffer);
+                quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boidHistory", boidHistoryBuffer);
             }
             
             // Set buffers for initialize tree kernel
@@ -234,6 +237,7 @@ namespace BoidsUnity
                 quadTreeShader.SetBuffer(trackMovedBoidsKernel, "boidHistory", boidHistoryBuffer);
                 quadTreeShader.SetBuffer(trackMovedBoidsKernel, "movedBoidIndices", movedBoidIndicesBuffer);
                 quadTreeShader.SetBuffer(trackMovedBoidsKernel, "movedBoidCount", movedBoidCountBuffer);
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "quadNodes", quadNodesBuffer);
             }
             
             if (incrementalUpdateKernel >= 0)
@@ -254,6 +258,7 @@ namespace BoidsUnity
                 quadTreeShader.SetBuffer(repairTreeStructureKernel, "nodeCounts", nodeCountsBuffer);
                 quadTreeShader.SetBuffer(repairTreeStructureKernel, "activeNodes", activeNodesBuffer);
                 quadTreeShader.SetBuffer(repairTreeStructureKernel, "activeNodeCount", activeNodeCountBuffer);
+                quadTreeShader.SetBuffer(repairTreeStructureKernel, "boidHistory", boidHistoryBuffer);
             }
             
             if (collapseNodesKernel >= 0)
@@ -290,6 +295,7 @@ namespace BoidsUnity
                 quadTreeShader.SetBuffer(trackMovedBoidsKernel, "boidHistory", boidHistoryBuffer);
                 quadTreeShader.SetBuffer(trackMovedBoidsKernel, "movedBoidIndices", movedBoidIndicesBuffer);
                 quadTreeShader.SetBuffer(trackMovedBoidsKernel, "movedBoidCount", movedBoidCountBuffer);
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "quadNodes", quadNodesBuffer);
                 quadTreeShader.SetFloat("deltaTime", Time.deltaTime);
                 
                 TimedDispatch(
@@ -349,6 +355,14 @@ namespace BoidsUnity
                     int adjustedMaxBoidsPerNode = numBoids > 50000 ? maxBoidsPerNode / 2 : maxBoidsPerNode;
                     quadTreeShader.SetInt("maxBoidsPerNode", adjustedMaxBoidsPerNode);
                     
+                    // Make sure all required buffers are set
+                    quadTreeShader.SetBuffer(repairTreeStructureKernel, "quadNodes", quadNodesBuffer);
+                    quadTreeShader.SetBuffer(repairTreeStructureKernel, "nodeCount", nodeCountBuffer);
+                    quadTreeShader.SetBuffer(repairTreeStructureKernel, "nodeCounts", nodeCountsBuffer);
+                    quadTreeShader.SetBuffer(repairTreeStructureKernel, "activeNodes", activeNodesBuffer);
+                    quadTreeShader.SetBuffer(repairTreeStructureKernel, "activeNodeCount", activeNodeCountBuffer);
+                    quadTreeShader.SetBuffer(repairTreeStructureKernel, "boidHistory", boidHistoryBuffer);
+                    
                     TimedDispatch(
                         quadTreeShader,
                         repairTreeStructureKernel,
@@ -367,6 +381,16 @@ namespace BoidsUnity
                         // First try to subdivide nodes that need it
                         if (subdivideAndRedistributeKernel >= 0) {
                             ProfilingUtility.BeginSample("SubdivideNodes");
+                            // Make sure all buffers are properly bound
+                            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "quadNodes", quadNodesBuffer);
+                            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "nodeCount", nodeCountBuffer);
+                            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "activeNodes", activeNodesBuffer);
+                            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "activeNodeCount", activeNodeCountBuffer);
+                            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boidIndices", boidIndicesBuffer);
+                            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "nodeCounts", nodeCountsBuffer);
+                            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boids", boidBuffer);
+                            quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boidHistory", boidHistoryBuffer);
+                            
                             quadTreeShader.Dispatch(subdivideAndRedistributeKernel, 
                                 Mathf.CeilToInt(activeCount[0] / 256f), 1, 1);
                             ProfilingUtility.EndSample("SubdivideNodes");
@@ -391,6 +415,10 @@ namespace BoidsUnity
                 ProfilingUtility.BeginSample("SortBoids");
                 quadTreeShader.SetBuffer(sortBoidsKernel, "boids", boidBuffer);
                 quadTreeShader.SetBuffer(sortBoidsKernel, "boidsOut", boidBufferOut);
+                quadTreeShader.SetBuffer(sortBoidsKernel, "quadNodes", quadNodesBuffer);
+                quadTreeShader.SetBuffer(sortBoidsKernel, "boidIndices", boidIndicesBuffer);
+                quadTreeShader.SetBuffer(sortBoidsKernel, "nodeCount", nodeCountBuffer);
+                quadTreeShader.SetBuffer(sortBoidsKernel, "boidHistory", boidHistoryBuffer);
                 
                 TimedDispatch(
                     quadTreeShader,
@@ -445,6 +473,13 @@ namespace BoidsUnity
                 // Set all needed buffers
                 quadTreeShader.SetBuffer(buildUnifiedKernel, "boids", boidBuffer);
                 quadTreeShader.SetBuffer(buildUnifiedKernel, "boidsOut", boidBufferOut);
+                quadTreeShader.SetBuffer(buildUnifiedKernel, "quadNodes", quadNodesBuffer);
+                quadTreeShader.SetBuffer(buildUnifiedKernel, "nodeCount", nodeCountBuffer);
+                quadTreeShader.SetBuffer(buildUnifiedKernel, "activeNodes", activeNodesBuffer);
+                quadTreeShader.SetBuffer(buildUnifiedKernel, "activeNodeCount", activeNodeCountBuffer);
+                quadTreeShader.SetBuffer(buildUnifiedKernel, "boidIndices", boidIndicesBuffer);
+                quadTreeShader.SetBuffer(buildUnifiedKernel, "nodeCounts", nodeCountsBuffer);
+                quadTreeShader.SetBuffer(buildUnifiedKernel, "boidHistory", boidHistoryBuffer);
                 
                 // For 60K+ boids, use smaller maxBoidsPerNode to force more subdivision
                 int adjustedMaxBoidsPerNode = numBoids > 50000 ? maxBoidsPerNode / 2 : maxBoidsPerNode;
@@ -478,6 +513,23 @@ namespace BoidsUnity
                 }
                 
                 ProfilingUtility.EndSample("BuildQuadtreeUnified");
+                
+                // Add a call to force redistribution to ensure boids move from root to leaves
+                int forceRedistributeKernel = quadTreeShader.FindKernel("ForceRedistributeRootBoids");
+                quadTreeShader.SetBuffer(forceRedistributeKernel, "boids", boidBuffer);
+                quadTreeShader.SetBuffer(forceRedistributeKernel, "boidIndices", boidIndicesBuffer);
+                quadTreeShader.SetBuffer(forceRedistributeKernel, "quadNodes", quadNodesBuffer);
+                quadTreeShader.SetBuffer(forceRedistributeKernel, "nodeCounts", nodeCountsBuffer);
+                quadTreeShader.SetBuffer(forceRedistributeKernel, "boidHistory", boidHistoryBuffer);
+                quadTreeShader.SetInt("numBoids", numBoids);
+                
+                // Run the redistribution multiple times for better results
+                ProfilingUtility.BeginSample("FinalTreeRedistribution");
+                for (int i = 0; i < 3; i++) {
+                    quadTreeShader.Dispatch(forceRedistributeKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                    quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+                }
+                ProfilingUtility.EndSample("FinalTreeRedistribution");
                 
                 // Run the simulation using the built quadtree
                 boidShader.SetBuffer(boidShader.FindKernel("UpdateBoids"), "boidsIn", boidBuffer);
@@ -527,6 +579,16 @@ namespace BoidsUnity
                         quadTreeShader.SetInt("numBoids", numBoids);
                         quadTreeShader.SetInt("maxBoidsPerNode", maxBoidsPerNode);
                         
+                        // Make sure all buffers are properly bound
+                        quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "quadNodes", quadNodesBuffer);
+                        quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "nodeCount", nodeCountBuffer);
+                        quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "activeNodes", activeNodesBuffer);
+                        quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "activeNodeCount", activeNodeCountBuffer);
+                        quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boidIndices", boidIndicesBuffer);
+                        quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "nodeCounts", nodeCountsBuffer);
+                        quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boids", boidBuffer);
+                        quadTreeShader.SetBuffer(subdivideAndRedistributeKernel, "boidHistory", boidHistoryBuffer);
+                        
                         // Dispatch with enough threads for both operations
                         int threadGroups = Mathf.Max(
                             Mathf.CeilToInt(numBoids / 256f),
@@ -558,15 +620,25 @@ namespace BoidsUnity
                 
                 // After updating node counts, apply a final redistribution
                 int forceRedistributeKernel = quadTreeShader.FindKernel("ForceRedistributeRootBoids");
+                
+                // Bind all required buffers
                 quadTreeShader.SetBuffer(forceRedistributeKernel, "boids", boidBuffer);
                 quadTreeShader.SetBuffer(forceRedistributeKernel, "boidIndices", boidIndicesBuffer);
                 quadTreeShader.SetBuffer(forceRedistributeKernel, "quadNodes", quadNodesBuffer);
                 quadTreeShader.SetBuffer(forceRedistributeKernel, "nodeCounts", nodeCountsBuffer);
+                quadTreeShader.SetBuffer(forceRedistributeKernel, "boidHistory", boidHistoryBuffer);
+                
                 quadTreeShader.SetInt("numBoids", numBoids);
                 
-                ProfilingUtility.BeginSample("ForceRedistributeRootBoids");
-                quadTreeShader.Dispatch(forceRedistributeKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
-                ProfilingUtility.EndSample("ForceRedistributeRootBoids");
+                // Run this multiple times to ensure good distribution
+                for (int i = 0; i < 3; i++) {
+                    ProfilingUtility.BeginSample($"ForceRedistributeRootBoids_{i}");
+                    quadTreeShader.Dispatch(forceRedistributeKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                    ProfilingUtility.EndSample($"ForceRedistributeRootBoids_{i}");
+                    
+                    // Update node counts after each redistribution
+                    quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+                }
 
                 // Recount boids once more after final redistribution
                 if (recountBoidsKernel >= 0) {
@@ -722,25 +794,65 @@ namespace BoidsUnity
         
         public void OnDrawGizmos(Transform parent)
         {
-            // Only draw if the game is playing, visualization is enabled, and quadtree is being used
-            if (!Application.isPlaying || !drawQuadTreeGizmos || !useQuadTree || quadNodesBuffer == null) 
+            // Check if we can draw the gizmos
+            if (!Application.isPlaying || !drawQuadTreeGizmos || quadNodesBuffer == null) 
                 return;
             
-            // Get node count
-            uint[] counts = new uint[1];
-            nodeCountBuffer.GetData(counts);
-            int nodeCount = (int)Mathf.Min(counts[0], MaxQuadNodes);
-            
-            // If there are no nodes or too many, skip visualization
-            if (nodeCount <= 0 || nodeCount > 1000) 
+            // Always draw a placeholder if the quadtree isn't in use but gizmos are enabled
+            if (!useQuadTree)
+            {
+                // Draw a simple placeholder to show that gizmos are working
+                Gizmos.color = new Color(0.5f, 0.5f, 0.5f, 0.5f);
+                Gizmos.DrawWireCube(Vector3.zero, new Vector3(initialQuadTreeSize * 2, initialQuadTreeSize * 2, 0.1f));
+                
+                #if UNITY_EDITOR
+                UnityEditor.Handles.Label(Vector3.zero, "Quadtree visualization enabled\nbut quadtree not in use");
+                #endif
+                
                 return;
+            }
             
-            // Read node data
-            QuadNode[] allNodes = new QuadNode[nodeCount];
-            quadNodesBuffer.GetData(allNodes, 0, 0, nodeCount);
-            
-            // Just visualize the root node and immediate children
-            DrawQuadNodeWithInfo(allNodes, 0, 0, Color.green);
+            try {
+                // Get node count
+                uint[] counts = new uint[1];
+                nodeCountBuffer.GetData(counts);
+                int nodeCount = (int)Mathf.Min(counts[0], MaxQuadNodes);
+                
+                // If there are no nodes, draw a placeholder
+                if (nodeCount <= 0) {
+                    Gizmos.color = Color.yellow;
+                    Gizmos.DrawWireCube(Vector3.zero, new Vector3(initialQuadTreeSize * 2, initialQuadTreeSize * 2, 0.1f));
+                    
+                    #if UNITY_EDITOR
+                    UnityEditor.Handles.Label(Vector3.zero, "Quadtree has 0 nodes");
+                    #endif
+                    
+                    return;
+                }
+                
+                // Read node data - even if there are a lot of nodes, we'll show at least the root
+                int maxNodesToShow = Mathf.Min(nodeCount, 1000); // Allow more nodes
+                QuadNode[] allNodes = new QuadNode[maxNodesToShow];
+                quadNodesBuffer.GetData(allNodes, 0, 0, maxNodesToShow);
+                
+                // Start recursive visualization from root
+                DrawQuadNodeWithInfo(allNodes, 0, 0, Color.green);
+                
+                // Draw a count in the corner
+                #if UNITY_EDITOR
+                UnityEditor.Handles.Label(new Vector3(-initialQuadTreeSize, initialQuadTreeSize, 0), 
+                    $"Quadtree: {nodeCount} nodes\nDetail level: {gizmoDetailLevel}");
+                #endif
+            }
+            catch (System.Exception e) {
+                // If anything goes wrong, at least show a message
+                Gizmos.color = Color.red;
+                Gizmos.DrawWireCube(Vector3.zero, new Vector3(initialQuadTreeSize * 2, initialQuadTreeSize * 2, 0.1f));
+                
+                #if UNITY_EDITOR
+                UnityEditor.Handles.Label(Vector3.zero, $"Error drawing quadtree: {e.Message}");
+                #endif
+            }
         }
         
         private void DrawQuadNodeWithInfo(QuadNode[] allNodes, uint nodeIndex, int depth, Color color)
@@ -751,16 +863,30 @@ namespace BoidsUnity
             
             QuadNode node = allNodes[nodeIndex];
             
-            // Draw this node
-            Gizmos.color = color;
+            // Draw this node with stronger color and thicker lines
             Vector3 center = new Vector3(node.center.x, node.center.y, 0);
             Vector3 size = new Vector3(node.size * 2, node.size * 2, 0.1f);
-            Gizmos.DrawWireCube(center, size);
+            
+            // Make root node very visible
+            if (nodeIndex == 0) {
+                // Draw a solid outline for the root node
+                Gizmos.color = new Color(0.2f, 0.8f, 0.2f, 0.8f);
+                Gizmos.DrawWireCube(center, size);
+                
+                // Add a thicker outline
+                Gizmos.color = new Color(0.0f, 0.6f, 0.0f, 0.6f);
+                Gizmos.DrawWireCube(center, new Vector3(size.x + 0.2f, size.y + 0.2f, size.z));
+                Gizmos.DrawWireCube(center, new Vector3(size.x - 0.2f, size.y - 0.2f, size.z));
+            } else {
+                // Other nodes get normal colors but stronger
+                Gizmos.color = new Color(color.r, color.g, color.b, 0.7f);  // More opaque
+                Gizmos.DrawWireCube(center, size);
+            }
             
             // Draw division lines for this node to show quadrants
             if (depth <= gizmoDetailLevel - 1)
             {
-                Gizmos.color = new Color(color.r, color.g, color.b, 0.3f);
+                Gizmos.color = new Color(color.r, color.g, color.b, 0.5f);  // More visible
                 Gizmos.DrawLine(
                     new Vector3(center.x - node.size, center.y, 0),
                     new Vector3(center.x + node.size, center.y, 0));
@@ -772,19 +898,40 @@ namespace BoidsUnity
             // Display node info based on boid count
             int boidCount = (int)node.count;
             
-            // Only draw filled boxes for nodes with boids
-            if (boidCount > 0)
-            {
-                // Use a color gradient based on boid count
-                float intensity = Mathf.Min(1.0f, boidCount / (float)maxBoidsPerNode);
-                Color fillColor = new Color(intensity, 0, 1-intensity, 0.2f);
+            // Use more visible colors and fill all nodes for better visualization
+            // Use a color gradient based on boid count
+            float intensity = Mathf.Min(1.0f, boidCount / (float)maxBoidsPerNode);
+            
+            // Draw all nodes with varying fill colors based on boid count
+            if (boidCount > 0) {
+                // Nodes with boids get a colored fill
+                Color fillColor = new Color(intensity, 0, 1-intensity, 0.25f);  // Higher alpha
                 Gizmos.color = fillColor;
                 Gizmos.DrawCube(center, size);
                 
+                // Highlight nodes that are nearly full
+                if (boidCount > maxBoidsPerNode * 0.75f) {
+                    Gizmos.color = new Color(1.0f, 0.3f, 0.3f, 0.4f);  // Red highlight
+                    Gizmos.DrawWireCube(center, new Vector3(size.x + 0.1f, size.y + 0.1f, size.z));
+                }
+                
                 // Add label for editor display
                 #if UNITY_EDITOR
-                if (boidCount > maxBoidsPerNode / 2 || depth <= 1) {
-                    UnityEditor.Handles.Label(center, $"Node {nodeIndex}: {boidCount}");
+                if (boidCount > maxBoidsPerNode / 4 || depth <= 1 || nodeIndex < 5) {
+                    UnityEditor.Handles.color = Color.white;
+                    UnityEditor.Handles.Label(center, $"N{nodeIndex}: {boidCount}");
+                }
+                #endif
+            } else {
+                // Empty nodes get a subtle gray fill
+                Gizmos.color = new Color(0.3f, 0.3f, 0.3f, 0.05f);
+                Gizmos.DrawCube(center, size);
+                
+                #if UNITY_EDITOR
+                // Show index for important empty nodes
+                if (depth <= 1 || nodeIndex < 5) {
+                    UnityEditor.Handles.color = new Color(0.7f, 0.7f, 0.7f, 0.7f);
+                    UnityEditor.Handles.Label(center, $"N{nodeIndex}: 0");
                 }
                 #endif
             }
@@ -792,8 +939,25 @@ namespace BoidsUnity
             // Draw children if not a leaf and has valid children
             if ((node.flags & NODE_LEAF) == 0 && node.childIndex > 0 && node.childIndex < allNodes.Length)
             {
-                // Alternate colors for child nodes
-                Color childColor = new Color(color.r * 0.8f, color.g * 0.8f, color.b * 0.8f);
+                // Use brighter color scheme for child nodes for better visibility
+                Color childColor;
+                if (depth == 0) {
+                    // First level children get distinct colors for each quadrant
+                    switch (nodeIndex % 4) {
+                        case 0: childColor = new Color(0.8f, 0.2f, 0.2f, 0.9f); break; // Red - NE
+                        case 1: childColor = new Color(0.2f, 0.8f, 0.2f, 0.9f); break; // Green - NW
+                        case 2: childColor = new Color(0.2f, 0.2f, 0.8f, 0.9f); break; // Blue - SW
+                        case 3: childColor = new Color(0.8f, 0.8f, 0.2f, 0.9f); break; // Yellow - SE
+                        default: childColor = color; break;
+                    }
+                } else {
+                    // Deeper children get slighter variations
+                    childColor = new Color(
+                        color.r * 0.85f + 0.15f,  // Brighten slightly
+                        color.g * 0.85f + 0.15f, 
+                        color.b * 0.85f + 0.15f,
+                        0.9f);  // Keep opacity high
+                }
                 
                 // Draw connecting lines from parent to each child
                 for (uint i = 0; i < 4; i++)
@@ -819,12 +983,13 @@ namespace BoidsUnity
                         // If there's significant discrepancy, highlight it
                         if (discrepancy > 0.01f)
                         {
+                            // Make alignment issues more visible
                             Gizmos.color = Color.red;
                             Gizmos.DrawLine(center, actualChildCenter);
                             
                             // Draw expected position as a dashed outline
                             Gizmos.color = Color.yellow;
-                            Gizmos.DrawWireSphere(expectedChildCenter, childSize * 0.1f);
+                            Gizmos.DrawWireSphere(expectedChildCenter, childSize * 0.2f);
                             
                             #if UNITY_EDITOR
                             UnityEditor.Handles.color = Color.red;
@@ -835,13 +1000,37 @@ namespace BoidsUnity
                         }
                         else
                         {
-                            // Draw thin connection line from parent to child
-                            Gizmos.color = new Color(0.7f, 0.7f, 0.7f, 0.3f);
+                            // Draw more visible connection lines between parent and child nodes
+                            // Use quadrant-specific colors
+                            Color connectionColor;
+                            switch (i) {
+                                case 0: connectionColor = new Color(0.9f, 0.1f, 0.1f, 0.7f); break; // NE - Red
+                                case 1: connectionColor = new Color(0.1f, 0.9f, 0.1f, 0.7f); break; // NW - Green
+                                case 2: connectionColor = new Color(0.1f, 0.1f, 0.9f, 0.7f); break; // SW - Blue
+                                case 3: connectionColor = new Color(0.9f, 0.9f, 0.1f, 0.7f); break; // SE - Yellow
+                                default: connectionColor = new Color(0.7f, 0.7f, 0.7f, 0.6f); break;
+                            }
+                            Gizmos.color = connectionColor;
                             Gizmos.DrawLine(center, actualChildCenter);
                         }
                         
-                        // Continue recursive drawing
-                        DrawQuadNodeWithInfo(allNodes, childIdx, depth + 1, childColor);
+                        // Create child-specific color for recursion
+                        Color nextLevelColor;
+                        if (depth == 0) {
+                            // First level children get distinct colors by quadrant
+                            switch (i) {
+                                case 0: nextLevelColor = new Color(0.8f, 0.2f, 0.2f, 0.8f); break; // NE - Red
+                                case 1: nextLevelColor = new Color(0.2f, 0.8f, 0.2f, 0.8f); break; // NW - Green
+                                case 2: nextLevelColor = new Color(0.2f, 0.2f, 0.8f, 0.8f); break; // SW - Blue
+                                case 3: nextLevelColor = new Color(0.8f, 0.8f, 0.2f, 0.8f); break; // SE - Yellow
+                                default: nextLevelColor = color; break;
+                            }
+                        } else {
+                            nextLevelColor = childColor;
+                        }
+                        
+                        // Continue recursive drawing with appropriate color
+                        DrawQuadNodeWithInfo(allNodes, childIdx, depth + 1, nextLevelColor);
                     }
                 }
             }

@@ -10,7 +10,7 @@ namespace BoidsUnity
 {
     public class Main2D : MonoBehaviour
     {
-        const float blockSize = 256f;
+        const float blockSize = 256f; // Match this with shader blockSize for UpdateBoids kernel
         
         [Header("Performance")]
         [SerializeField] int numBoids = 500;
@@ -35,8 +35,8 @@ namespace BoidsUnity
         [SerializeField] private int maxQuadTreeDepth = 8;
         [SerializeField] private int maxBoidsPerNode = 32;
         [SerializeField] private int initialQuadTreeSize = 500; 
-        [SerializeField] private bool drawQuadTreeGizmos = false;
-        [SerializeField] private int gizmoDetailLevel = 2;
+        [SerializeField] private bool drawQuadTreeGizmos = true;
+        [SerializeField] private int gizmoDetailLevel = 3; // Increased from 2 to show more levels
         
         [Header("Team Settings")]
         [SerializeField] float teamRatio = 0.5f;

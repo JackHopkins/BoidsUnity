@@ -221,6 +221,7 @@ void SortBoids(uint3 id : SV_DispatchThreadID) {
     
     // Get the boid index from quadtree order
     uint boidIdx = boidIndices[id.x * 2];
+    uint nodeIdx = boidIndices[id.x * 2 + 1]; // Get the node this boid is assigned to
     
     // Safety check
     if (boidIdx >= numBoids) return;
@@ -228,6 +229,16 @@ void SortBoids(uint3 id : SV_DispatchThreadID) {
     // Read once, write once for better memory performance
     Boid boid = boids[boidIdx];
     boidsOut[id.x] = boid;
+    
+    // IMPORTANT: Also update the boid history with the current node assignment
+    // This is critical for incremental updates to work correctly
+    BoidWithHistory boidHist = boidHistory[boidIdx];
+    
+    // Always ensure node assignment is correctly synchronized
+    if (boidHist.nodeIndex != nodeIdx) {
+        boidHist.nodeIndex = nodeIdx;
+        boidHistory[boidIdx] = boidHist;
+    }
 }
 
 
@@ -278,6 +289,9 @@ void ForceRedistributeRootBoids(uint3 id : SV_DispatchThreadID) {
     // Only process boids in the root node
     if (nodeIndex != 0) return;
     
+    // Get the boid position
+    Boid boid = boids[boidIndex];
+    
     // Get the root node
     QuadNode rootNode = quadNodes[0];
     
@@ -285,22 +299,43 @@ void ForceRedistributeRootBoids(uint3 id : SV_DispatchThreadID) {
     if ((rootNode.flags & NODE_LEAF) != 0 || rootNode.childIndex <= 0 || rootNode.childIndex >= MaxQuadNodes) 
         return;
     
-    // Get the boid position
-    Boid boid = boids[boidIndex];
+    // CRITICAL FIX: Traverse the tree to find a leaf node for this boid
+    uint currentNodeIndex = 0; // Start at root
+    QuadNode currentNode = rootNode;
     
-    // Calculate which quadrant this boid belongs to
-    uint quadrant = 0;
-    if (boid.pos.x < rootNode.center.x) quadrant |= 1; // west
-    if (boid.pos.y < rootNode.center.y) quadrant |= 2; // south
+    // Keep traversing down until we reach a leaf node
+    while ((currentNode.flags & NODE_LEAF) == 0 && currentNode.childIndex > 0) {
+        // Determine quadrant
+        uint quadrant = 0;
+        if (boid.pos.x < currentNode.center.x) quadrant |= 1; // west
+        if (boid.pos.y < currentNode.center.y) quadrant |= 2; // south
+        
+        // Calculate child node index
+        uint childIndex = currentNode.childIndex + quadrant;
+        
+        // Safety checks
+        if (childIndex >= MaxQuadNodes || childIndex == currentNodeIndex) 
+            break;
+        
+        // Move to child node
+        currentNodeIndex = childIndex;
+        currentNode = quadNodes[currentNodeIndex];
+    }
     
-    // Calculate child node index
-    uint childIndex = rootNode.childIndex + quadrant;
+    // Make sure we didn't end up at the root node
+    if (currentNodeIndex == 0) return;
     
-    // Make sure child index is valid
-    if (childIndex >= MaxQuadNodes) return;
+    // Force-update both the boid indices and history for consistency
+    boidIndices[id.x * 2 + 1] = currentNodeIndex;
     
-    // Force-update the boid's node assignment
-    boidIndices[id.x * 2 + 1] = childIndex;
+    // Update history record too
+    BoidWithHistory boidHist = boidHistory[boidIndex];
+    boidHist.nodeIndex = currentNodeIndex;
+    boidHistory[boidIndex] = boidHist;
+    
+    // Update node counts
+    InterlockedAdd(nodeCounts[0], -1); // Decrement root count
+    InterlockedAdd(nodeCounts[currentNodeIndex], 1); // Increment target node count
 }
 
 // OPTIMIZATION: Combined operation for subdividing and redistributing
@@ -314,7 +349,8 @@ void SubdivideAndRedistribute(uint3 id : SV_DispatchThreadID) {
     // All threads participate in sync barriers regardless of flow path
     bool canSubdivide = false;
     uint nodeIndex = 0;
-    QuadNode node;
+    // Initialize node with default values to avoid the warning
+    QuadNode node = (QuadNode)0; // Initialize all fields to zero
     
     if (id.x < totalActiveNodes) {
         nodeIndex = activeNodes[id.x];
@@ -497,12 +533,14 @@ void CollapseNodes(uint3 id : SV_DispatchThreadID) {
         // Turn this node back into a leaf
         node.flags |= NODE_LEAF;
         
-        // Skip the expensive O(n²) loop for high boid counts
-        // For high boid counts, we'll handle this differently - boids will be automatically
-        // reclassified when they next move significantly
+        // IMPROVED APPROACH THAT WORKS FOR ALL BOID COUNTS
+        // This method handles node collapsing more efficiently
+        
+        // If this is a low boid count, we can do a complete redistribution
         if (numBoids < HIGH_BOID_COUNT_THRESHOLD) {
-            // Redistribute all boids from children to this node - ONLY for small boid counts
+            // Process each boid to check if it's in one of the children
             for (uint j = 0; j < numBoids; j++) {
+                uint boidIdx = boidIndices[j * 2];
                 uint boidNodeIndex = boidIndices[j * 2 + 1];
                 
                 // Check if this boid is in one of the children
@@ -516,23 +554,58 @@ void CollapseNodes(uint3 id : SV_DispatchThreadID) {
                 }
                 
                 if (inChild) {
-                    // Move boid to this node
+                    // Move boid to this node in the indices array
                     boidIndices[j * 2 + 1] = nodeIndex;
                     
-                    // Update history
-                    BoidWithHistory boidHist = boidHistory[j];
+                    // Also update the history record for proper incremental updates
+                    BoidWithHistory boidHist = boidHistory[boidIdx];
                     boidHist.nodeIndex = nodeIndex;
-                    boidHistory[j] = boidHist;
+                    boidHistory[boidIdx] = boidHist;
                 }
             }
         } else {
-            // For high boid counts, just flag the boids in these nodes to be recalculated
-            // next time they're processed in TrackMovedBoids - much more efficient
-            for (uint k = 0; k < 4; k++) {
-                uint childIdx = node.childIndex + k;
-                if (childIdx < totalNodes) {
-                    quadNodes[childIdx].flags |= 0x10; // Special flag to mark as needing reclassification
+            // For high boid counts, use a more efficient approach
+            // We'll scan the boid indices and update only those that match our child nodes
+            
+            // Create a small local buffer to store children indices for fast lookup
+            uint childIndices[4];
+            for (uint c = 0; c < 4; c++) {
+                childIndices[c] = node.childIndex + c;
+            }
+            
+            // Process a subset of boids per thread
+            uint boidsPerThread = (numBoids + blockSize - 1) / blockSize;
+            uint startIdx = id.x * boidsPerThread;
+            uint endIdx = min(startIdx + boidsPerThread, numBoids);
+            
+            // Process only the boid range assigned to this thread
+            for (uint j = startIdx; j < endIdx; j++) {
+                uint boidIdx = boidIndices[j * 2];
+                uint boidNodeIndex = boidIndices[j * 2 + 1];
+                
+                // Check if this boid is in one of our children
+                for (uint k = 0; k < 4; k++) {
+                    if (boidNodeIndex == childIndices[k]) {
+                        // Update the assignment to this node
+                        boidIndices[j * 2 + 1] = nodeIndex;
+                        
+                        // Update history
+                        BoidWithHistory boidHist = boidHistory[boidIdx];
+                        boidHist.nodeIndex = nodeIndex;
+                        boidHistory[boidIdx] = boidHist;
+                        break;
+                    }
                 }
+            }
+        }
+        
+        // Also flag the children nodes to ensure any boids we missed will be reclassified
+        for (uint k = 0; k < 4; k++) {
+            uint childIdx = node.childIndex + k;
+            if (childIdx < totalNodes) {
+                QuadNode childNode = quadNodes[childIdx];
+                childNode.flags |= 0x10; // Mark as needing reclassification
+                quadNodes[childIdx] = childNode;
             }
         }
         
@@ -840,11 +913,13 @@ void IncrementalQuadTreeUpdate(uint3 id : SV_DispatchThreadID) {
     // Get the current node assignment
     uint oldNodeIndex = boidHist.nodeIndex;
     
-    // Start traversal from the root to find the new node
-    uint newNodeIndex = 0;
+    // ALWAYS traverse from the root to find the most appropriate node
+    // This is important to avoid boids getting stuck in outdated node assignments
+    uint newNodeIndex = 0; // Start at root
     QuadNode currentNode = quadNodes[newNodeIndex];
     
-    // Traverse to find the leaf node for this boid
+    // Traverse the tree to find the correct leaf node for this boid
+    // This guarantees proper node assignment even if the tree structure has changed
     while ((currentNode.flags & NODE_LEAF) == 0 && currentNode.childIndex > 0) {
         // Determine which quadrant the boid belongs to
         uint quadrant = 0;
@@ -862,6 +937,13 @@ void IncrementalQuadTreeUpdate(uint3 id : SV_DispatchThreadID) {
         // Move to the child node
         newNodeIndex = childIndex;
         currentNode = quadNodes[newNodeIndex];
+        
+        // Extra check to verify the node is valid and active
+        if ((currentNode.flags & NODE_ACTIVE) == 0) {
+            // If we reached an inactive node, stop traversal and use parent
+            newNodeIndex = oldNodeIndex; // Revert to original node
+            break;
+        }
     }
     
     // Only update if the boid has moved to a new node
@@ -979,14 +1061,25 @@ void BuildQuadtreeUnified(uint3 id : SV_DispatchThreadID) {
     // Ensure initialization is complete
     DeviceMemoryBarrier();
     
-    // PHASE 3: Insert boids - All threads within numBoids participate
+    // PHASE 3: Insert boids AND update boid history node assignment
     if (id.x < numBoids) {
+        // Store the original boid index
         boidIndices[id.x * 2] = id.x;
-        boidIndices[id.x * 2 + 1] = 0;  // Assign to root initially
+        
+        // Assign to root initially
+        boidIndices[id.x * 2 + 1] = 0;
+        
+        // Also update the boid history record with the correct node assignment
+        // This is crucial for incremental updates to work properly
+        BoidWithHistory boidHist = boidHistory[id.x];
+        boidHist.nodeIndex = 0; // Assign to root node
+        boidHistory[id.x] = boidHist;
+        
+        // Increment root node count
         InterlockedAdd(nodeCounts[0], 1);
     }
     
-    // Ensure all boids are inserted
+    // Ensure all boids are inserted and history is updated
     DeviceMemoryBarrier();
     
     // PHASE 4: Update node counts - All threads within MaxQuadNodes participate
@@ -1070,23 +1163,46 @@ void BuildQuadtreeUnified(uint3 id : SV_DispatchThreadID) {
             Boid boid = boids[boidIndex];
             QuadNode node = quadNodes[nodeIndex];
             
-            // Check if node is not a leaf (has been subdivided)
-            if ((node.flags & NODE_LEAF) == 0 && node.childIndex > 0) {
-                // Determine quadrant
+            // ESSENTIAL FIX: We need to find the correct leaf node for this boid
+            // Start from current node but traverse down to a leaf
+            uint currentNodeIndex = nodeIndex;
+            QuadNode currentNode = node;
+            
+            // Keep traversing down the tree until we reach a leaf node
+            while ((currentNode.flags & NODE_LEAF) == 0 && currentNode.childIndex > 0) {
+                // Determine which quadrant this boid belongs to
                 uint quadrant = 0;
-                if (boid.pos.x < node.center.x) quadrant |= 1;
-                if (boid.pos.y < node.center.y) quadrant |= 2;
+                if (boid.pos.x < currentNode.center.x) quadrant |= 1; // West
+                if (boid.pos.y < currentNode.center.y) quadrant |= 2; // South
                 
-                uint childIndex = node.childIndex + quadrant;
+                // Calculate child node index
+                uint childIndex = currentNode.childIndex + quadrant;
                 
-                if (childIndex < MaxQuadNodes) {
-                    // Update node assignment
-                    boidIndices[id.x * 2 + 1] = childIndex;
-                    
-                    // Update node counts
-                    InterlockedAdd(nodeCounts[childIndex], 1);
-                    InterlockedAdd(nodeCounts[nodeIndex], -1);
+                // Safety check to avoid infinite loops or invalid indices
+                if (childIndex >= MaxQuadNodes || childIndex == currentNodeIndex) {
+                    break;
                 }
+                
+                // Decrement count in current node before moving down
+                InterlockedAdd(nodeCounts[currentNodeIndex], -1);
+                
+                // Move to child node
+                currentNodeIndex = childIndex;
+                currentNode = quadNodes[currentNodeIndex];
+            }
+            
+            // If we found a different node than the original, update assignments
+            if (currentNodeIndex != nodeIndex) {
+                // Update node assignment in boid indices
+                boidIndices[id.x * 2 + 1] = currentNodeIndex;
+                
+                // Update the history record to maintain consistency
+                BoidWithHistory boidHist = boidHistory[boidIndex];
+                boidHist.nodeIndex = currentNodeIndex;
+                boidHistory[boidIndex] = boidHist;
+                
+                // Update count in the final node
+                InterlockedAdd(nodeCounts[currentNodeIndex], 1);
             }
         }
         
@@ -1101,6 +1217,23 @@ void BuildQuadtreeUnified(uint3 id : SV_DispatchThreadID) {
         }
         
         // Ensure node counts are updated before next iteration
+        DeviceMemoryBarrier();
+        
+        // PHASE 5D: Every other iteration, update boid history to match the current assignment
+        // This helps ensure consistency between boidIndices and boidHistory
+        if ((uint)iteration % 2u == 1u && id.x < numBoids) {
+            uint boidIdx = boidIndices[id.x * 2];
+            uint nodeIdx = boidIndices[id.x * 2 + 1];
+            
+            // Update the history record to match current node assignment
+            BoidWithHistory boidHist = boidHistory[boidIdx];
+            if (boidHist.nodeIndex != nodeIdx) {
+                boidHist.nodeIndex = nodeIdx;
+                boidHistory[boidIdx] = boidHist;
+            }
+        }
+        
+        // Ensure boid history updates are complete before next iteration
         DeviceMemoryBarrier();
     }
     
