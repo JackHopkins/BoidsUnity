@@ -99,16 +99,23 @@ namespace BoidsUnity
         public void UpdateGridGPU(int numBoids, ComputeBuffer boidBuffer, ComputeBuffer boidBufferOut)
         {   
             // Clear indices
+            ProfilingUtility.BeginSample("ClearGridIndices");
             gridShader.Dispatch(clearGridKernel, blocks, 1, 1);
+            ProfilingUtility.EndSample("ClearGridIndices");
 
             // Populate grid
+            ProfilingUtility.BeginSample("PopulateGrid");
             gridShader.Dispatch(updateGridKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+            ProfilingUtility.EndSample("PopulateGrid");
 
             // Generate Offsets (Prefix Sum)
             // Offsets in each block
+            ProfilingUtility.BeginSample("PrefixSumBlocks");
             gridShader.Dispatch(prefixSumKernel, blocks, 1, 1);
+            ProfilingUtility.EndSample("PrefixSumBlocks");
 
             // Offsets for sums of blocks
+            ProfilingUtility.BeginSample("PrefixSumHierarchical");
             bool swap = false;
             for (int d = 1; d < blocks; d *= 2)
             {
@@ -118,13 +125,40 @@ namespace BoidsUnity
                 gridShader.Dispatch(sumBlocksKernel, Mathf.CeilToInt(blocks / 256f), 1, 1);
                 swap = !swap;
             }
+            ProfilingUtility.EndSample("PrefixSumHierarchical");
 
             // Apply offsets of sums to each block
+            ProfilingUtility.BeginSample("ApplySums");
             gridShader.SetBuffer(addSumsKernel, "gridSumsBufferIn", swap ? gridSumsBuffer : gridSumsBuffer2);
             gridShader.Dispatch(addSumsKernel, blocks, 1, 1);
+            ProfilingUtility.EndSample("ApplySums");
 
             // Rearrange boids
+            ProfilingUtility.BeginSample("RearrangeBoids");
+            
+            // Time this dispatch specifically
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            
             gridShader.Dispatch(rearrangeBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+            
+            // Force GPU to complete work
+            GL.Flush();
+            
+            sw.Stop();
+            double ms = sw.Elapsed.TotalMilliseconds;
+            
+            // Record timing for high boid counts
+            if (numBoids > 10000)
+            {
+                ProfilingUtility.RecordManualTiming("RearrangeBoidsGPU", ms);
+                
+                if (numBoids > 25000 && Time.frameCount % 120 == 0)
+                {
+                    Debug.Log($"Rearranging {numBoids} boids took {ms:F2}ms");
+                }
+            }
+            
+            ProfilingUtility.EndSample("RearrangeBoids");
         }
         
         // CPU-side grid functions

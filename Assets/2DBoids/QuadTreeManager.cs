@@ -192,13 +192,28 @@ namespace BoidsUnity
                 boidShader.SetBuffer(boidShader.FindKernel("UpdateBoids"), "boidsOut", boidBufferOut);
                 boidShader.SetFloat("deltaTime", Time.deltaTime);
                 boidShader.SetInt("useQuadTree", 1);
-                boidShader.Dispatch(boidShader.FindKernel("UpdateBoids"), Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                
+                ProfilingUtility.BeginSample("UpdateBoidKernel");
+                
+                // Use the helper method to time and profile the dispatch
+                TimedDispatch(
+                    boidShader, 
+                    boidShader.FindKernel("UpdateBoids"), 
+                    Mathf.CeilToInt(numBoids / 256f), 1, 1, 
+                    "UpdateBoidKernelNoRebuild", 
+                    numBoids
+                );
+                
+                ProfilingUtility.EndSample("UpdateBoidKernel");
+                
                 return;
             }
 
             // First, completely clear the quadtree and node counts
             quadTreeShader.SetBuffer(clearNodeCountsKernel, "nodeCounts", nodeCountsBuffer);
+            ProfilingUtility.BeginSample("ClearNodeCounts");
             quadTreeShader.Dispatch(clearNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+            ProfilingUtility.EndSample("ClearNodeCounts");
 
             // Approach 1: Use a single unified kernel (most efficient, but may not work on all platforms)
             if (useUnifiedKernel && buildUnifiedKernel >= 0)
@@ -208,7 +223,10 @@ namespace BoidsUnity
                 if (resetRootKernel >= 0) {
                     quadTreeShader.SetBuffer(resetRootKernel, "quadNodes", quadNodesBuffer);
                     quadTreeShader.SetFloat("worldSize", initialQuadTreeSize);
+                    
+                    ProfilingUtility.BeginSample("ResetRootNode");
                     quadTreeShader.Dispatch(resetRootKernel, 1, 1, 1);
+                    ProfilingUtility.EndSample("ResetRootNode");
                 }
 
                 // Set all needed buffers
@@ -219,28 +237,71 @@ namespace BoidsUnity
                 quadTreeShader.SetFloat("worldSize", initialQuadTreeSize);
 
                 // Single dispatch for the entire tree building process
+                ProfilingUtility.BeginSample("BuildQuadtreeUnified");
+                
+                // Use a simple approach - ensure GL.Flush to make timing more accurate
+                System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+                
+                // Dispatch the kernel
                 quadTreeShader.Dispatch(buildUnifiedKernel, Mathf.Max(1, Mathf.CeilToInt(numBoids / 256f)), 1, 1);
+                
+                // Force GPU to finish work before stopping timer
+                GL.Flush();
+                
+                sw.Stop();
+                double ms = sw.Elapsed.TotalMilliseconds;
+                
+                // Record this timing for the profiler
+                ProfilingUtility.RecordManualTiming("BuildQuadtreeUnified", ms);
+                
+                // Log occasional timing for debugging
+                if (Time.frameCount % 60 == 0)
+                {
+                    Debug.Log($"BuildQuadtreeUnified timing: {ms:F3} ms");
+                }
+                
+                ProfilingUtility.EndSample("BuildQuadtreeUnified");
                 
                 // Run the simulation using the built quadtree
                 boidShader.SetBuffer(boidShader.FindKernel("UpdateBoids"), "boidsIn", boidBuffer);
                 boidShader.SetBuffer(boidShader.FindKernel("UpdateBoids"), "boidsOut", boidBufferOut);
                 boidShader.SetFloat("deltaTime", Time.deltaTime);
                 boidShader.SetInt("useQuadTree", 1);
-                boidShader.Dispatch(boidShader.FindKernel("UpdateBoids"), Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                
+                ProfilingUtility.BeginSample("UpdateBoidKernel");
+                
+                // Use the helper method to time and profile the dispatch
+                TimedDispatch(
+                    boidShader, 
+                    boidShader.FindKernel("UpdateBoids"), 
+                    Mathf.CeilToInt(numBoids / 256f), 1, 1, 
+                    "UpdateBoidKernelGPU", 
+                    numBoids
+                );
+                
+                ProfilingUtility.EndSample("UpdateBoidKernel");
             }
             // Approach 2: Use separate kernel dispatches
             else
             {
                 // Reset the tree completely with a proper root node
                 quadTreeShader.SetFloat("worldSize", initialQuadTreeSize);
+                
+                ProfilingUtility.BeginSample("InitializeQuadTree");
                 quadTreeShader.Dispatch(initializeTreeKernel, 1, 1, 1);
+                ProfilingUtility.EndSample("InitializeQuadTree");
 
                 // Insert boids into quadtree
                 quadTreeShader.SetInt("numBoids", numBoids);
+                
+                ProfilingUtility.BeginSample("InsertBoids");
                 quadTreeShader.Dispatch(insertBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                ProfilingUtility.EndSample("InsertBoids");
                 
                 // Update node counts
+                ProfilingUtility.BeginSample("UpdateNodeCounts");
                 quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+                ProfilingUtility.EndSample("UpdateNodeCounts");
                 
                 // Use fewer iterations with combined subdivide and redistribute
                 if (subdivideAndRedistributeKernel >= 0) {
@@ -254,18 +315,27 @@ namespace BoidsUnity
                             Mathf.CeilToInt(numBoids / 256f),
                             Mathf.CeilToInt(MaxQuadNodes / 256f)
                         );
+                        
+                        ProfilingUtility.BeginSample($"SubdivideAndRedistribute_I{i}");
                         quadTreeShader.Dispatch(subdivideAndRedistributeKernel, threadGroups, 1, 1);
+                        ProfilingUtility.EndSample($"SubdivideAndRedistribute_I{i}");
                         
                         // Clear and update node counts after each iteration
+                        ProfilingUtility.BeginSample($"ClearNodeCounts_I{i}");
                         quadTreeShader.Dispatch(clearNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+                        ProfilingUtility.EndSample($"ClearNodeCounts_I{i}");
                         
                         // Recount all boids after redistribution
                         if (recountBoidsKernel >= 0) {
+                            ProfilingUtility.BeginSample($"RecountBoids_I{i}");
                             quadTreeShader.Dispatch(recountBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                            ProfilingUtility.EndSample($"RecountBoids_I{i}");
                         }
                         
                         // Update node counts after recounting
+                        ProfilingUtility.BeginSample($"UpdateNodeCounts_I{i}");
                         quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+                        ProfilingUtility.EndSample($"UpdateNodeCounts_I{i}");
                     }
                 }
                 
@@ -276,26 +346,57 @@ namespace BoidsUnity
                 quadTreeShader.SetBuffer(forceRedistributeKernel, "quadNodes", quadNodesBuffer);
                 quadTreeShader.SetBuffer(forceRedistributeKernel, "nodeCounts", nodeCountsBuffer);
                 quadTreeShader.SetInt("numBoids", numBoids);
+                
+                ProfilingUtility.BeginSample("ForceRedistributeRootBoids");
                 quadTreeShader.Dispatch(forceRedistributeKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                ProfilingUtility.EndSample("ForceRedistributeRootBoids");
 
                 // Recount boids once more after final redistribution
                 if (recountBoidsKernel >= 0) {
+                    ProfilingUtility.BeginSample("RecountBoids_Final");
                     quadTreeShader.Dispatch(recountBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                    ProfilingUtility.EndSample("RecountBoids_Final");
                 }
 
                 // Update node counts again
+                ProfilingUtility.BeginSample("UpdateNodeCounts_Final");
                 quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+                ProfilingUtility.EndSample("UpdateNodeCounts_Final");
                 
                 // Sort boids according to quadtree
                 quadTreeShader.SetInt("numBoids", numBoids);
-                quadTreeShader.Dispatch(sortBoidsKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                
+                ProfilingUtility.BeginSample("SortBoids");
+                
+                // Use the helper method to time and profile the dispatch
+                TimedDispatch(
+                    quadTreeShader, 
+                    sortBoidsKernel, 
+                    Mathf.CeilToInt(numBoids / 256f), 1, 1, 
+                    "SortBoidsGPU", 
+                    numBoids
+                );
+                
+                ProfilingUtility.EndSample("SortBoids");
                 
                 // Run the boid update
                 boidShader.SetBuffer(boidShader.FindKernel("UpdateBoids"), "boidsIn", boidBuffer);
                 boidShader.SetBuffer(boidShader.FindKernel("UpdateBoids"), "boidsOut", boidBufferOut);
                 boidShader.SetFloat("deltaTime", Time.deltaTime);
                 boidShader.SetInt("useQuadTree", 1);
-                boidShader.Dispatch(boidShader.FindKernel("UpdateBoids"), Mathf.CeilToInt(numBoids / 256f), 1, 1);
+                
+                ProfilingUtility.BeginSample("UpdateBoidKernel");
+                
+                // Use the helper method to time and profile the dispatch
+                TimedDispatch(
+                    boidShader, 
+                    boidShader.FindKernel("UpdateBoids"), 
+                    Mathf.CeilToInt(numBoids / 256f), 1, 1, 
+                    "UpdateBoidKernelMultiDisp", 
+                    numBoids
+                );
+                
+                ProfilingUtility.EndSample("UpdateBoidKernel");
             }
             
             if (printQuadTreeDebugInfo && Time.frameCount % debugPrintInterval == 0) {
@@ -526,6 +627,31 @@ namespace BoidsUnity
                         DrawQuadNodeWithInfo(allNodes, childIdx, depth + 1, childColor);
                     }
                 }
+            }
+        }
+        
+        // Helper method to time a GPU compute dispatch with profiling
+        private void TimedDispatch(ComputeShader shader, int kernelId, int threadGroupsX, int threadGroupsY, int threadGroupsZ, string profileName, int boidsCount)
+        {
+            // Use stopwatch for precise timing
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            
+            // Dispatch the compute shader
+            shader.Dispatch(kernelId, threadGroupsX, threadGroupsY, threadGroupsZ);
+            
+            // Force GPU to complete
+            GL.Flush();
+            
+            sw.Stop();
+            double ms = sw.Elapsed.TotalMilliseconds;
+            
+            // Record timing data
+            ProfilingUtility.RecordManualTiming(profileName, ms);
+            
+            // Log for high boid counts
+            if (boidsCount > 25000 && Time.frameCount % 300 == 0)
+            {
+                Debug.Log($"{profileName} with {boidsCount} boids took {ms:F2}ms");
             }
         }
         

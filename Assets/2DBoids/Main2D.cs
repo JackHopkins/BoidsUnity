@@ -78,9 +78,19 @@ namespace BoidsUnity
         readonly int cpuLimit = 1 << 16;
         readonly int gpuLimit = (int)blockSize * 65535;
         
+        // Profiling
+        private ComputeShaderProfiler profiler;
+        
         void Awake()
         {
             numSlider.maxValue = Mathf.Log(useGpu ? gpuLimit : cpuLimit, 2);
+            
+            // Add the compute shader profiler component if it doesn't exist
+            profiler = GetComponent<ComputeShaderProfiler>();
+            if (profiler == null)
+            {
+                profiler = gameObject.AddComponent<ComputeShaderProfiler>();
+            }
         }
         
         void Start()
@@ -221,19 +231,28 @@ namespace BoidsUnity
         
         void Update()
         {
+            // Start frame profiling
+            ProfilingUtility.BeginSample("FullFrame");
+            float frameStartTime = Time.realtimeSinceStartup;
+            
             // Update FPS
-            fpsText.text = "FPS: " + (int)(1 / Time.smoothDeltaTime);
+            fpsText.text = string.Format("FPS: {0} | Boids: {1:N0}", (int)(1 / Time.smoothDeltaTime), numBoids);
             
             if (useGpu)
             {
                 // Update obstacles if needed
+                ProfilingUtility.BeginSample("UpdateObstacles");
                 obstacleManager.UpdateObstacleData(useGpu);
+                ProfilingUtility.EndSample("UpdateObstacles");
                 
                 // Set delta time for physics simulation
                 boidShader.SetFloat("deltaTime", Time.deltaTime);
                 
                 if (useQuadTree)
                 {
+                    // Profile the complete quadtree update operation
+                    ProfilingUtility.BeginSample("CompleteQuadTreeUpdate");
+                    
                     // Update using quadtree
                     quadTreeManager.UpdateQuadTree(numBoids, boidBuffer, boidBufferOut, boidShader);
                     
@@ -241,24 +260,36 @@ namespace BoidsUnity
                     var temp = boidBuffer;
                     boidBuffer = boidBufferOut;
                     boidBufferOut = temp;
+                    
+                    ProfilingUtility.EndSample("CompleteQuadTreeUpdate");
                 }
                 else
                 {
+                    // Profile the grid operations
+                    ProfilingUtility.BeginSample("CompleteGridUpdate");
+                    
                     // Update using spatial grid
                     boidShader.SetInt("useQuadTree", 0);
                     gridManager.UpdateGridGPU(numBoids, boidBuffer, boidBufferOut);
                     
                     // Compute boid behaviors
+                    ProfilingUtility.BeginSample("BoidSimulation");
                     boidShader.Dispatch(updateBoidsKernel, Mathf.CeilToInt(numBoids / blockSize), 1, 1);
+                    GL.Flush(); // Force GPU to complete before timing
+                    ProfilingUtility.EndSample("BoidSimulation");
                     
                     // Swap buffers
                     var temp = boidBuffer;
                     boidBuffer = boidBufferOut;
                     boidBufferOut = temp;
+                    
+                    ProfilingUtility.EndSample("CompleteGridUpdate");
                 }
             }
             else // CPU mode
             {
+                ProfilingUtility.BeginSample("CPUSimulation");
+                
                 // Spatial grid
                 gridManager.ClearGrid();
                 gridManager.UpdateGrid(boids, numBoids);
@@ -280,10 +311,27 @@ namespace BoidsUnity
                 
                 // Send updated positions to GPU for rendering
                 boidBuffer.SetData(boids);
+                
+                ProfilingUtility.EndSample("CPUSimulation");
             }
             
-            // Render the boids
+            // Render the boids - this could be a bottleneck with high counts
+            ProfilingUtility.BeginSample("RenderPipeline");
             boidRenderer.RenderBoids(numBoids);
+            ProfilingUtility.EndSample("RenderPipeline");
+            
+            // Calculate actual frame time
+            float frameTime = (Time.realtimeSinceStartup - frameStartTime) * 1000f;
+            ProfilingUtility.EndSample("FullFrame");
+            
+            // Record the actual frame time for profiling
+            ProfilingUtility.RecordManualTiming("ActualFrameTime", frameTime);
+            
+            // Log every N frames with high boid counts
+            if (numBoids > 10000 && Time.frameCount % 60 == 0)
+            {
+                Debug.Log($"High boid count performance: {numBoids} boids, {frameTime:F2}ms per frame");
+            }
         }
         
         // Called from UI slider
