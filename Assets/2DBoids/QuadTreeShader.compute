@@ -2,13 +2,23 @@
 #define blockSize 256  // Reduced from 1024 to 256 for better occupancy
 #define NODE_LEAF 1
 #define NODE_ACTIVE 2
-#define MaxQuadNodes 16384
-
+#define MaxQuadNodes 65536  // Increased from 16384 to 65536 for high boid counts
+#define BOUNDARY_THRESHOLD 0.1  // Fraction of quad size to consider "near boundary" (reduced from 0.2)
+#define VELOCITY_FRAMES_AHEAD 1.5 // How many frames ahead to project velocity (reduced from 3.0)
+#define HIGH_BOID_COUNT_THRESHOLD 25000 // Threshold to activate high-performance optimizations
 
 struct Boid {
     float2 pos;
     float2 vel;
     uint team;
+};
+
+struct BoidWithHistory {
+    float2 pos;      // Current position
+    float2 prevPos;  // Previous position for tracking movement
+    float2 vel;
+    uint team;
+    uint nodeIndex;  // Current quadtree node index
 };
 
 struct QuadNode {
@@ -29,12 +39,16 @@ RWStructuredBuffer<uint> boidIndices;        // Maps from quadtree order to boid
 StructuredBuffer<Boid> boids;                // Original boids
 RWStructuredBuffer<Boid> boidsOut;           // Reordered boids
 RWStructuredBuffer<uint> nodeCounts;         // Dedicated buffer for atomic counting
+RWStructuredBuffer<BoidWithHistory> boidHistory; // Tracks boid history for incremental updates
+RWStructuredBuffer<uint> movedBoidIndices;   // Indices of boids that moved significantly
+RWStructuredBuffer<uint> movedBoidCount;     // Number of boids that moved significantly
 
 // Parameters
 uint maxDepth;             // Maximum depth of the quad-tree
 uint maxBoidsPerNode;      // Maximum boids per leaf node before subdivision
 uint numBoids;             // Total number of boids
 float worldSize;           // Size of the world (half-width)
+float deltaTime;           // Time since last frame
 
 // Determine which quadrant a point belongs to (0=NE, 1=NW, 2=SW, 3=SE)
 uint GetQuadrant(float2 center, float2 pos) {
@@ -131,6 +145,32 @@ void ActivateRoot() {
     quadNodes[0] = root;
     activeNodeCount[0] = 1;
     activeNodes[0] = 0;
+}
+
+// Initialize boid history buffer - used when we first create the quadtree
+#pragma kernel InitializeBoidHistory
+[numthreads(blockSize, 1, 1)]
+void InitializeBoidHistory(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= numBoids) return;
+    
+    // Get current boid
+    Boid boid = boids[id.x];
+    
+    // Create history entry with current position as both current and previous
+    BoidWithHistory boidHist;
+    boidHist.pos = boid.pos;
+    boidHist.prevPos = boid.pos; // Initialize previous pos to current
+    boidHist.vel = boid.vel;
+    boidHist.team = boid.team;
+    boidHist.nodeIndex = 0; // Default to root node
+    
+    // Write to history buffer
+    boidHistory[id.x] = boidHist;
+    
+    // Reset moved boid count on first thread
+    if (id.x == 0) {
+        movedBoidCount[0] = 0;
+    }
 }
 
 // Insert boids into the quadtree (kernel 1)
@@ -410,6 +450,117 @@ void ResetRootNode() {
     activeNodes[0] = 0;
 }
 
+// Collapse empty or near-empty nodes back into their parent
+#pragma kernel CollapseNodes
+[numthreads(blockSize, 1, 1)]
+void CollapseNodes(uint3 id : SV_DispatchThreadID) {
+    // Get total active nodes to process
+    uint totalActiveNodes;
+    InterlockedAdd(activeNodeCount[0], 0, totalActiveNodes);
+    
+    // Only process active nodes
+    if (id.x >= totalActiveNodes) return;
+    
+    // Get the active node index
+    uint nodeIndex = activeNodes[id.x];
+    QuadNode node = quadNodes[nodeIndex];
+    
+    // Skip if this is not a non-leaf node that wants to collapse
+    if ((node.flags & NODE_LEAF) != 0 || node.count >= (maxBoidsPerNode / 4)) return;
+    
+    // Check if all children are leaves with few boids in total
+    bool canCollapse = true;
+    uint totalChildBoids = 0;
+    uint totalNodes;
+    InterlockedAdd(nodeCount[0], 0, totalNodes);
+    
+    // Skip if no valid children
+    if (node.childIndex <= 0 || node.childIndex >= totalNodes) return;
+    
+    // Check each child
+    for (uint i = 0; i < 4; i++) {
+        uint childIdx = node.childIndex + i;
+        if (childIdx >= totalNodes) continue;
+        
+        QuadNode child = quadNodes[childIdx];
+        totalChildBoids += child.count;
+        
+        // If any child is not a leaf, we can't collapse
+        if ((child.flags & NODE_LEAF) == 0) {
+            canCollapse = false;
+            break;
+        }
+    }
+    
+    // Only collapse if all children together have few enough boids
+    if (canCollapse && totalChildBoids < maxBoidsPerNode) {
+        // Turn this node back into a leaf
+        node.flags |= NODE_LEAF;
+        
+        // Skip the expensive O(n²) loop for high boid counts
+        // For high boid counts, we'll handle this differently - boids will be automatically
+        // reclassified when they next move significantly
+        if (numBoids < HIGH_BOID_COUNT_THRESHOLD) {
+            // Redistribute all boids from children to this node - ONLY for small boid counts
+            for (uint j = 0; j < numBoids; j++) {
+                uint boidNodeIndex = boidIndices[j * 2 + 1];
+                
+                // Check if this boid is in one of the children
+                bool inChild = false;
+                for (uint k = 0; k < 4; k++) {
+                    uint childIdx = node.childIndex + k;
+                    if (boidNodeIndex == childIdx) {
+                        inChild = true;
+                        break;
+                    }
+                }
+                
+                if (inChild) {
+                    // Move boid to this node
+                    boidIndices[j * 2 + 1] = nodeIndex;
+                    
+                    // Update history
+                    BoidWithHistory boidHist = boidHistory[j];
+                    boidHist.nodeIndex = nodeIndex;
+                    boidHistory[j] = boidHist;
+                }
+            }
+        } else {
+            // For high boid counts, just flag the boids in these nodes to be recalculated
+            // next time they're processed in TrackMovedBoids - much more efficient
+            for (uint k = 0; k < 4; k++) {
+                uint childIdx = node.childIndex + k;
+                if (childIdx < totalNodes) {
+                    quadNodes[childIdx].flags |= 0x10; // Special flag to mark as needing reclassification
+                }
+            }
+        }
+        
+        // Update the node count
+        node.count = totalChildBoids;
+        nodeCounts[nodeIndex] = totalChildBoids;
+        
+        // Set child nodes as inactive
+        for (uint m = 0; m < 4; m++) {
+            uint childIdx = node.childIndex + m;
+            if (childIdx < totalNodes) {
+                QuadNode child = quadNodes[childIdx];
+                child.count = 0;
+                child.flags &= ~NODE_ACTIVE;  // Clear active flag
+                quadNodes[childIdx] = child;
+                nodeCounts[childIdx] = 0;
+            }
+        }
+        
+        // Mark children as available for reuse by clearing childIndex
+        // but keep the reference for later cleanup if needed
+        // node.childIndex = 0;
+        
+        // Write back the updated node
+        quadNodes[nodeIndex] = node;
+    }
+}
+
 #pragma kernel RecountBoids
 [numthreads(blockSize, 1, 1)]
 void RecountBoids(uint3 id : SV_DispatchThreadID) {
@@ -456,6 +607,130 @@ RWStructuredBuffer<uint> testBuffer;
 void TestMaxBoidsPerNode() {
     // Simply copy the value directly
     testBuffer[0] = maxBoidsPerNode;
+}
+
+// Track which boids are likely to cross a quadtree boundary
+#pragma kernel TrackMovedBoids
+[numthreads(blockSize, 1, 1)]
+void TrackMovedBoids(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= numBoids) return;
+    
+    // Reset the moved boid count for first thread
+    if (id.x == 0) {
+        movedBoidCount[0] = 0;
+    }
+    
+    // Ensure the count is initialized before proceeding
+    DeviceMemoryBarrier();
+    
+    // Get current boid data
+    Boid currentBoid = boids[id.x];
+    BoidWithHistory boidHist = boidHistory[id.x];
+    
+    // Skip most processing for high boid counts to improve performance
+    bool isHighBoidCount = numBoids > HIGH_BOID_COUNT_THRESHOLD;
+    
+    // Get the current node this boid belongs to
+    uint nodeIndex = boidHist.nodeIndex;
+    bool needsUpdate = false;
+    
+    // Check if the node index is valid
+    if (nodeIndex < MaxQuadNodes) {
+        // Optimization: For high boid counts, check the most critical cases only
+        // 1. First check if it's outside its current node which is the most common case
+        // 2. Only if it's within the node, check for reclassification flag
+        
+        QuadNode node = quadNodes[nodeIndex];
+        
+        // Simple position check first (most efficient)
+        float2 boidPos = currentBoid.pos;
+        float nodeSize = node.size;
+        float2 nodeCenter = node.center;
+        
+        bool outsideQuad = 
+            boidPos.x < (nodeCenter.x - nodeSize) || 
+            boidPos.x > (nodeCenter.x + nodeSize) ||
+            boidPos.y < (nodeCenter.y - nodeSize) || 
+            boidPos.y > (nodeCenter.y + nodeSize);
+        
+        if (outsideQuad) {
+            needsUpdate = true;
+        }
+        // Only do more expensive flag check if not already marked for update
+        else if ((node.flags & 0x10) != 0) {
+            needsUpdate = true;
+        }
+        else {
+            float2 boidVel = currentBoid.vel;
+            
+            // For high boid counts, we already checked if outside quad - just need boundary checks
+            if (numBoids > HIGH_BOID_COUNT_THRESHOLD) {
+                // We already did the outside quad check above
+                needsUpdate = false;
+            }
+            else {
+                // Detailed check for lower boid counts - check boundaries and velocity
+                // Calculate distance from boid to each boundary of its quad
+                float distToLeftBoundary = boidPos.x - (nodeCenter.x - nodeSize);
+                float distToRightBoundary = (nodeCenter.x + nodeSize) - boidPos.x;
+                float distToBottomBoundary = boidPos.y - (nodeCenter.y - nodeSize);
+                float distToTopBoundary = (nodeCenter.y + nodeSize) - boidPos.y;
+                
+                // Calculate threshold distance based on node size
+                float boundaryThreshold = nodeSize * BOUNDARY_THRESHOLD;
+                
+                // Project the boid's position forward based on velocity
+                float2 projectedPos = boidPos + (boidVel * deltaTime * VELOCITY_FRAMES_AHEAD);
+                
+                // Check if the boid is:
+                // 1. Near the left boundary AND moving left
+                // 2. Near the right boundary AND moving right
+                // 3. Near the bottom boundary AND moving down
+                // 4. Near the top boundary AND moving up
+                bool nearLeftAndMovingLeft = distToLeftBoundary < boundaryThreshold && boidVel.x < 0;
+                bool nearRightAndMovingRight = distToRightBoundary < boundaryThreshold && boidVel.x > 0;
+                bool nearBottomAndMovingDown = distToBottomBoundary < boundaryThreshold && boidVel.y < 0;
+                bool nearTopAndMovingUp = distToTopBoundary < boundaryThreshold && boidVel.y > 0;
+                
+                // Also check if the projected position would be outside the current quad
+                bool projectedOutsideQuad = 
+                    projectedPos.x < (nodeCenter.x - nodeSize) || 
+                    projectedPos.x > (nodeCenter.x + nodeSize) ||
+                    projectedPos.y < (nodeCenter.y - nodeSize) || 
+                    projectedPos.y > (nodeCenter.y + nodeSize);
+                
+                // Flag boid as needing update if it's near a boundary and moving toward it,
+                // or if it's projected to leave the quad soon
+                needsUpdate = nearLeftAndMovingLeft || nearRightAndMovingRight || 
+                            nearBottomAndMovingDown || nearTopAndMovingUp ||
+                            projectedOutsideQuad;
+            }
+        }
+    } else {
+        // If the node index is invalid, force an update
+        needsUpdate = true;
+    }
+    
+    // Add to moved boids list if it needs update
+    if (needsUpdate) {
+        uint index;
+        InterlockedAdd(movedBoidCount[0], 1, index);
+        
+        // Record this boid's index in the moved list
+        if (index < numBoids) {
+            movedBoidIndices[index] = id.x;
+        }
+    }
+    
+    // Always update the history
+    boidHist.prevPos = boidHist.pos;
+    boidHist.pos = currentBoid.pos;
+    boidHist.vel = currentBoid.vel;
+    boidHist.team = currentBoid.team;
+    // Keep the current node assignment
+    
+    // Write back to history buffer
+    boidHistory[id.x] = boidHist;
 }
 
 // OPTIMIZATION: This is a test/debug kernel that manually subdivides just the root
@@ -515,6 +790,135 @@ void SumNodeCounts() {
     
     // Write back
     quadNodes[0] = root;
+}
+
+// Incremental update of quadtree - only process boids that moved significantly
+#pragma kernel IncrementalQuadTreeUpdate
+[numthreads(blockSize, 1, 1)]
+void IncrementalQuadTreeUpdate(uint3 id : SV_DispatchThreadID) {
+    // Get the number of boids that moved significantly
+    uint numMovedBoids = movedBoidCount[0];
+    
+    // Only process if this thread maps to a moved boid
+    if (id.x >= numMovedBoids) return;
+    
+    // Get the actual boid index from the moved list
+    uint boidIndex = movedBoidIndices[id.x];
+    
+    // Get the boid's current data
+    Boid boid = boids[boidIndex];
+    BoidWithHistory boidHist = boidHistory[boidIndex];
+    
+    // Get the current node assignment
+    uint oldNodeIndex = boidHist.nodeIndex;
+    
+    // Start traversal from the root to find the new node
+    uint newNodeIndex = 0;
+    QuadNode currentNode = quadNodes[newNodeIndex];
+    
+    // Traverse to find the leaf node for this boid
+    while ((currentNode.flags & NODE_LEAF) == 0 && currentNode.childIndex > 0) {
+        // Determine which quadrant the boid belongs to
+        uint quadrant = 0;
+        if (boid.pos.x < currentNode.center.x) quadrant |= 1; // west
+        if (boid.pos.y < currentNode.center.y) quadrant |= 2; // south
+        
+        // Calculate index of the child node for this quadrant
+        uint childIndex = currentNode.childIndex + quadrant;
+        
+        // Safety check
+        if (childIndex >= MaxQuadNodes || childIndex == newNodeIndex) {
+            break;
+        }
+        
+        // Move to the child node
+        newNodeIndex = childIndex;
+        currentNode = quadNodes[newNodeIndex];
+    }
+    
+    // Only update if the boid has moved to a new node
+    if (oldNodeIndex != newNodeIndex) {
+        // Remove from old node (atomic to avoid race conditions)
+        if (oldNodeIndex < MaxQuadNodes) {
+            InterlockedAdd(nodeCounts[oldNodeIndex], -1);
+        }
+        
+        // Add to new node (atomic to avoid race conditions)
+        InterlockedAdd(nodeCounts[newNodeIndex], 1);
+        
+        // Update boid's node index
+        boidIndices[boidIndex * 2 + 1] = newNodeIndex;
+        boidHist.nodeIndex = newNodeIndex;
+        boidHistory[boidIndex] = boidHist;
+    }
+}
+
+// Check if nodes need to be subdivided or merged based on the updated counts
+#pragma kernel RepairTreeStructure
+[numthreads(blockSize, 1, 1)]
+void RepairTreeStructure(uint3 id : SV_DispatchThreadID) {
+    // Get total node count
+    uint totalNodes;
+    InterlockedAdd(nodeCount[0], 0, totalNodes);
+    
+    if (id.x >= totalNodes) return;
+    
+    // Copy node counts to the actual node structures
+    QuadNode node = quadNodes[id.x];
+    node.count = nodeCounts[id.x];
+    
+    // If this is a leaf node and exceeds threshold, mark as active for subdivision
+    if ((node.flags & NODE_LEAF) != 0 && node.count > maxBoidsPerNode) {
+        // Mark as active
+        node.flags |= NODE_ACTIVE;
+        
+        // Add to active nodes list
+        uint activeIdx;
+        InterlockedAdd(activeNodeCount[0], 1, activeIdx);
+        
+        if (activeIdx < MaxQuadNodes) {
+            activeNodes[activeIdx] = id.x;
+        }
+    }
+    // If this is a parent node with very few boids (potentially after boids moved away),
+    // consider collapsing it back to a leaf - by marking it active
+    else if ((node.flags & NODE_LEAF) == 0 && node.count < (maxBoidsPerNode / 4) && 
+             node.childIndex > 0 && node.childIndex < totalNodes) {
+        // Check if all children are leaves and have few boids
+        bool canCollapse = true;
+        uint totalChildBoids = 0;
+        
+        for (uint i = 0; i < 4; i++) {
+            uint childIdx = node.childIndex + i;
+            if (childIdx >= totalNodes) continue;
+            
+            QuadNode child = quadNodes[childIdx];
+            totalChildBoids += child.count;
+            
+            // If any child is not a leaf, we can't collapse
+            if ((child.flags & NODE_LEAF) == 0) {
+                canCollapse = false;
+                break;
+            }
+        }
+        
+        // Only collapse if all children together have few boids
+        if (canCollapse && totalChildBoids < maxBoidsPerNode) {
+            // Mark as active for potential collapse
+            node.flags |= NODE_ACTIVE;
+            
+            // Add to active nodes list for processing
+            uint activeIdx;
+            InterlockedAdd(activeNodeCount[0], 1, activeIdx);
+            
+            if (activeIdx < MaxQuadNodes) {
+                activeNodes[activeIdx] = id.x;
+            }
+        }
+    }
+    
+    // Write back node with potentially updated flags
+    quadNodes[id.x] = node;
 }
 
 #pragma kernel BuildQuadtreeUnified

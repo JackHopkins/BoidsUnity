@@ -10,7 +10,7 @@ namespace BoidsUnity
         // Constants
         private const int NODE_LEAF = 1;
         private const int NODE_ACTIVE = 2;
-        private const int MaxQuadNodes = 16384;
+        private const int MaxQuadNodes = 65536; // Increased from 16384 for high boid counts
         
         // Settings
         public bool useQuadTree = false;
@@ -37,6 +37,17 @@ namespace BoidsUnity
         private ComputeBuffer nodeCountsBuffer;
         private ComputeBuffer subdivDebugBuffer;
         
+        // Incremental update buffers
+        private ComputeBuffer boidHistoryBuffer;
+        private ComputeBuffer movedBoidIndicesBuffer;
+        private ComputeBuffer movedBoidCountBuffer;
+        
+        // Incremental update settings
+        private bool useIncrementalUpdates = true;
+        private int fullRebuildInterval = 120; // Full rebuild every N frames (increased from 60)
+        private int highBoidCountRebuildInterval = 180; // Even less frequent rebuilds for high counts
+        private const int HighBoidCountThreshold = 25000; // Matches shader constant
+        
         // Kernel IDs
         private int recountBoidsKernel;
         private int clearQuadTreeKernel;
@@ -48,11 +59,18 @@ namespace BoidsUnity
         private int clearNodeCountsKernel;
         private int updateNodeCountsKernel;
         
+        // Incremental update kernels
+        private int trackMovedBoidsKernel;
+        private int incrementalUpdateKernel;
+        private int repairTreeStructureKernel;
+        private int collapseNodesKernel;
+        private int initializeBoidHistoryKernel;
+        
         public QuadTreeManager(ComputeShader shader)
         {
             quadTreeShader = shader;
             
-            // Get kernel IDs
+            // Get kernel IDs for standard operations
             recountBoidsKernel = quadTreeShader.FindKernel("RecountBoids");
             clearQuadTreeKernel = quadTreeShader.FindKernel("ClearQuadTree");
             insertBoidsKernel = quadTreeShader.FindKernel("InsertBoids");
@@ -62,13 +80,20 @@ namespace BoidsUnity
             initializeTreeKernel = quadTreeShader.FindKernel("InitializeQuadTree");
             buildUnifiedKernel = quadTreeShader.FindKernel("BuildQuadtreeUnified");
             subdivideAndRedistributeKernel = quadTreeShader.FindKernel("SubdivideAndRedistribute");
+            
+            // Get kernel IDs for incremental updates
+            trackMovedBoidsKernel = quadTreeShader.FindKernel("TrackMovedBoids");
+            incrementalUpdateKernel = quadTreeShader.FindKernel("IncrementalQuadTreeUpdate");
+            repairTreeStructureKernel = quadTreeShader.FindKernel("RepairTreeStructure");
+            collapseNodesKernel = quadTreeShader.FindKernel("CollapseNodes");
+            initializeBoidHistoryKernel = quadTreeShader.FindKernel("InitializeBoidHistory");
         }
         
         public void Initialize(int numBoids, ComputeBuffer boidBuffer, ComputeBuffer boidBufferOut, ComputeShader boidShader)
         {
             if (quadTreeShader == null) return;
             
-            // Create buffers
+            // Create standard buffers
             quadNodesBuffer = new ComputeBuffer(MaxQuadNodes, 28); // 28 bytes per node
             nodeCountBuffer = new ComputeBuffer(1, 4);
             boidIndicesBuffer = new ComputeBuffer(numBoids * 2, 4);
@@ -76,9 +101,20 @@ namespace BoidsUnity
             activeNodeCountBuffer = new ComputeBuffer(1, 4);
             nodeCountsBuffer = new ComputeBuffer(MaxQuadNodes, 4);
             
-            // Set initial parameters
+            // Create incremental update buffers
+            boidHistoryBuffer = new ComputeBuffer(numBoids, 28); // BoidWithHistory struct (pos, prevPos, vel, team, nodeIndex)
+            movedBoidIndicesBuffer = new ComputeBuffer(numBoids, 4);
+            movedBoidCountBuffer = new ComputeBuffer(1, 4);
+            
+            // Initialize moved boid count to 0
+            uint[] initialMovedCount = new uint[] { 0 };
+            movedBoidCountBuffer.SetData(initialMovedCount);
+            
+            // Set initial parameters - adjust maxBoidsPerNode for high boid counts
+            int adjustedMaxBoidsPerNode = numBoids > HighBoidCountThreshold ? maxBoidsPerNode * 4 : maxBoidsPerNode;
+            
             quadTreeShader.SetInt("maxDepth", maxQuadTreeDepth);
-            quadTreeShader.SetInt("maxBoidsPerNode", maxBoidsPerNode);
+            quadTreeShader.SetInt("maxBoidsPerNode", adjustedMaxBoidsPerNode);
             quadTreeShader.SetInt("numBoids", numBoids);
             quadTreeShader.SetFloat("worldSize", initialQuadTreeSize);
             
@@ -112,12 +148,23 @@ namespace BoidsUnity
             boidShader.SetBuffer(boidShader.FindKernel("UpdateBoids"), "nodeCount", nodeCountBuffer);
             boidShader.SetInt("useQuadTree", useQuadTree ? 1 : 0);
             
+            // Set up all kernel buffers
             SetupKernelBuffers(boidBuffer, boidBufferOut);
+            
+            // Initialize boid history for tracking movement
+            quadTreeShader.SetBuffer(initializeBoidHistoryKernel, "boids", boidBuffer);
+            quadTreeShader.SetBuffer(initializeBoidHistoryKernel, "boidHistory", boidHistoryBuffer);
+            quadTreeShader.SetBuffer(initializeBoidHistoryKernel, "movedBoidCount", movedBoidCountBuffer);
+            quadTreeShader.SetInt("numBoids", numBoids);
+            
+            ProfilingUtility.BeginSample("InitializeBoidHistory");
+            quadTreeShader.Dispatch(initializeBoidHistoryKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
+            ProfilingUtility.EndSample("InitializeBoidHistory");
         }
         
         private void SetupKernelBuffers(ComputeBuffer boidBuffer, ComputeBuffer boidBufferOut)
         {
-            // Set buffers for various kernels
+            // Set buffers for standard kernels
             quadTreeShader.SetBuffer(recountBoidsKernel, "boidIndices", boidIndicesBuffer);
             quadTreeShader.SetBuffer(recountBoidsKernel, "nodeCounts", nodeCountsBuffer);
             
@@ -178,37 +225,201 @@ namespace BoidsUnity
                 quadTreeShader.SetBuffer(initializeTreeKernel, "activeNodeCount", activeNodeCountBuffer);
                 quadTreeShader.SetBuffer(initializeTreeKernel, "nodeCounts", nodeCountsBuffer);
             }
+            
+            // Set buffers for incremental update kernels
+            if (trackMovedBoidsKernel >= 0)
+            {
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "boids", boidBuffer);
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "boidHistory", boidHistoryBuffer);
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "movedBoidIndices", movedBoidIndicesBuffer);
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "movedBoidCount", movedBoidCountBuffer);
+            }
+            
+            if (incrementalUpdateKernel >= 0)
+            {
+                quadTreeShader.SetBuffer(incrementalUpdateKernel, "boids", boidBuffer);
+                quadTreeShader.SetBuffer(incrementalUpdateKernel, "boidHistory", boidHistoryBuffer);
+                quadTreeShader.SetBuffer(incrementalUpdateKernel, "movedBoidIndices", movedBoidIndicesBuffer);
+                quadTreeShader.SetBuffer(incrementalUpdateKernel, "movedBoidCount", movedBoidCountBuffer);
+                quadTreeShader.SetBuffer(incrementalUpdateKernel, "quadNodes", quadNodesBuffer);
+                quadTreeShader.SetBuffer(incrementalUpdateKernel, "nodeCounts", nodeCountsBuffer);
+                quadTreeShader.SetBuffer(incrementalUpdateKernel, "boidIndices", boidIndicesBuffer);
+            }
+            
+            if (repairTreeStructureKernel >= 0)
+            {
+                quadTreeShader.SetBuffer(repairTreeStructureKernel, "quadNodes", quadNodesBuffer);
+                quadTreeShader.SetBuffer(repairTreeStructureKernel, "nodeCount", nodeCountBuffer);
+                quadTreeShader.SetBuffer(repairTreeStructureKernel, "nodeCounts", nodeCountsBuffer);
+                quadTreeShader.SetBuffer(repairTreeStructureKernel, "activeNodes", activeNodesBuffer);
+                quadTreeShader.SetBuffer(repairTreeStructureKernel, "activeNodeCount", activeNodeCountBuffer);
+            }
+            
+            if (collapseNodesKernel >= 0)
+            {
+                quadTreeShader.SetBuffer(collapseNodesKernel, "quadNodes", quadNodesBuffer);
+                quadTreeShader.SetBuffer(collapseNodesKernel, "nodeCount", nodeCountBuffer);
+                quadTreeShader.SetBuffer(collapseNodesKernel, "nodeCounts", nodeCountsBuffer);
+                quadTreeShader.SetBuffer(collapseNodesKernel, "activeNodes", activeNodesBuffer);
+                quadTreeShader.SetBuffer(collapseNodesKernel, "activeNodeCount", activeNodeCountBuffer);
+                quadTreeShader.SetBuffer(collapseNodesKernel, "boidIndices", boidIndicesBuffer);
+                quadTreeShader.SetBuffer(collapseNodesKernel, "boidHistory", boidHistoryBuffer);
+            }
         }
         
         public void UpdateQuadTree(int numBoids, ComputeBuffer boidBuffer, ComputeBuffer boidBufferOut, ComputeShader boidShader)
         {
             if (!useQuadTree || quadTreeShader == null) return;
 
-            // OPTIMIZATION 1: Only rebuild quadtree every N frames
-            // This dramatically reduces GPU overhead when boids move slowly
-            if (Time.frameCount % 3 != 0) {
-                // Just run the simulation using the existing quadtree
+            // Set shared parameters
+            quadTreeShader.SetInt("numBoids", numBoids);
+            
+            // Check if we should do a full rebuild or incremental update
+            // For high boid counts, use a longer rebuild interval
+            int rebuildInterval = numBoids > HighBoidCountThreshold ? highBoidCountRebuildInterval : fullRebuildInterval;
+            bool doFullRebuild = !useIncrementalUpdates || Time.frameCount % rebuildInterval == 0;
+
+            if (!doFullRebuild) {
+                // INCREMENTAL UPDATE APPROACH
+                ProfilingUtility.BeginSample("IncrementalQuadTreeUpdate");
+                
+                // 1. Track which boids have moved significantly
+                ProfilingUtility.BeginSample("TrackMovedBoids");
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "boids", boidBuffer);
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "boidHistory", boidHistoryBuffer);
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "movedBoidIndices", movedBoidIndicesBuffer);
+                quadTreeShader.SetBuffer(trackMovedBoidsKernel, "movedBoidCount", movedBoidCountBuffer);
+                quadTreeShader.SetFloat("deltaTime", Time.deltaTime);
+                
+                TimedDispatch(
+                    quadTreeShader,
+                    trackMovedBoidsKernel,
+                    Mathf.CeilToInt(numBoids / 256f), 1, 1,
+                    "TrackMovedBoids",
+                    numBoids
+                );
+                ProfilingUtility.EndSample("TrackMovedBoids");
+                
+                // Read back the moved boid count to determine if we need to continue with incremental update
+                uint[] movedCount = new uint[1];
+                movedBoidCountBuffer.GetData(movedCount);
+                
+                // Occasionally log how many boids needed updating (less frequently for high boid counts)
+                int logInterval = numBoids > HighBoidCountThreshold ? 300 : 60;
+                if (Time.frameCount % logInterval == 0) {
+                    float percentMoved = (movedCount[0] / (float)numBoids) * 100f;
+                    Debug.Log($"Incremental update: {movedCount[0]}/{numBoids} boids ({percentMoved:F1}%) near boundary");
+                }
+                
+                if (movedCount[0] > 0) {
+                    // Clear node counts for accurate recounting
+                    ProfilingUtility.BeginSample("ClearNodeCounts");
+                    quadTreeShader.Dispatch(clearNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+                    ProfilingUtility.EndSample("ClearNodeCounts");
+                    
+                    // 2. Update the quadtree for boids that moved
+                    ProfilingUtility.BeginSample("UpdateMovedBoids");
+                    quadTreeShader.SetBuffer(incrementalUpdateKernel, "boids", boidBuffer);
+                    quadTreeShader.SetBuffer(incrementalUpdateKernel, "boidHistory", boidHistoryBuffer);
+                    quadTreeShader.SetBuffer(incrementalUpdateKernel, "movedBoidIndices", movedBoidIndicesBuffer);
+                    quadTreeShader.SetBuffer(incrementalUpdateKernel, "movedBoidCount", movedBoidCountBuffer);
+                    quadTreeShader.SetBuffer(incrementalUpdateKernel, "quadNodes", quadNodesBuffer);
+                    quadTreeShader.SetBuffer(incrementalUpdateKernel, "nodeCounts", nodeCountsBuffer);
+                    quadTreeShader.SetBuffer(incrementalUpdateKernel, "boidIndices", boidIndicesBuffer);
+                    
+                    // Use enough thread groups to cover all moved boids
+                    TimedDispatch(
+                        quadTreeShader,
+                        incrementalUpdateKernel,
+                        Mathf.CeilToInt(movedCount[0] / 256f), 1, 1,
+                        "IncrementalUpdate",
+                        (int)movedCount[0]
+                    );
+                    ProfilingUtility.EndSample("UpdateMovedBoids");
+
+                    // 3. Update node counts from atomic counters
+                    ProfilingUtility.BeginSample("UpdateNodeCounts");
+                    quadTreeShader.Dispatch(updateNodeCountsKernel, Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1);
+                    ProfilingUtility.EndSample("UpdateNodeCounts");
+                    
+                    // 4. Check if nodes need subdivision or merging
+                    ProfilingUtility.BeginSample("RepairTreeStructure");
+                    int adjustedMaxBoidsPerNode = numBoids > HighBoidCountThreshold ? maxBoidsPerNode * 4 : maxBoidsPerNode;
+                    quadTreeShader.SetInt("maxBoidsPerNode", adjustedMaxBoidsPerNode);
+                    
+                    TimedDispatch(
+                        quadTreeShader,
+                        repairTreeStructureKernel,
+                        Mathf.CeilToInt(MaxQuadNodes / 256f), 1, 1,
+                        "RepairTreeStructure",
+                        numBoids
+                    );
+                    ProfilingUtility.EndSample("RepairTreeStructure");
+                    
+                    // Check for active nodes that need processing
+                    uint[] activeCount = new uint[1];
+                    activeNodeCountBuffer.GetData(activeCount);
+                    
+                    if (activeCount[0] > 0) {
+                        // If there are active nodes, process them (subdivide or collapse)
+                        // First try to subdivide nodes that need it
+                        if (subdivideAndRedistributeKernel >= 0) {
+                            ProfilingUtility.BeginSample("SubdivideNodes");
+                            quadTreeShader.Dispatch(subdivideAndRedistributeKernel, 
+                                Mathf.CeilToInt(activeCount[0] / 256f), 1, 1);
+                            ProfilingUtility.EndSample("SubdivideNodes");
+                        }
+                        
+                        // Then try to collapse nodes that are nearly empty
+                        if (collapseNodesKernel >= 0) {
+                            ProfilingUtility.BeginSample("CollapseNodes");
+                            TimedDispatch(
+                                quadTreeShader,
+                                collapseNodesKernel,
+                                Mathf.CeilToInt(activeCount[0] / 256f), 1, 1,
+                                "CollapseNodes",
+                                numBoids
+                            );
+                            ProfilingUtility.EndSample("CollapseNodes");
+                        }
+                    }
+                }
+                
+                // Sort boids based on the quadtree
+                ProfilingUtility.BeginSample("SortBoids");
+                quadTreeShader.SetBuffer(sortBoidsKernel, "boids", boidBuffer);
+                quadTreeShader.SetBuffer(sortBoidsKernel, "boidsOut", boidBufferOut);
+                
+                TimedDispatch(
+                    quadTreeShader,
+                    sortBoidsKernel,
+                    Mathf.CeilToInt(numBoids / 256f), 1, 1,
+                    "SortBoidsGPU",
+                    numBoids
+                );
+                ProfilingUtility.EndSample("SortBoids");
+                
+                // Run the boid update using the maintained quadtree
                 boidShader.SetBuffer(boidShader.FindKernel("UpdateBoids"), "boidsIn", boidBuffer);
                 boidShader.SetBuffer(boidShader.FindKernel("UpdateBoids"), "boidsOut", boidBufferOut);
                 boidShader.SetFloat("deltaTime", Time.deltaTime);
                 boidShader.SetInt("useQuadTree", 1);
                 
                 ProfilingUtility.BeginSample("UpdateBoidKernel");
-                
-                // Use the helper method to time and profile the dispatch
                 TimedDispatch(
-                    boidShader, 
-                    boidShader.FindKernel("UpdateBoids"), 
-                    Mathf.CeilToInt(numBoids / 256f), 1, 1, 
-                    "UpdateBoidKernelNoRebuild", 
+                    boidShader,
+                    boidShader.FindKernel("UpdateBoids"),
+                    Mathf.CeilToInt(numBoids / 256f), 1, 1,
+                    "UpdateBoidKernelIncremental",
                     numBoids
                 );
-                
                 ProfilingUtility.EndSample("UpdateBoidKernel");
                 
+                ProfilingUtility.EndSample("IncrementalQuadTreeUpdate");
                 return;
             }
 
+            // Full rebuild approach (used periodically to prevent any potential degradation)
             // First, completely clear the quadtree and node counts
             quadTreeShader.SetBuffer(clearNodeCountsKernel, "nodeCounts", nodeCountsBuffer);
             ProfilingUtility.BeginSample("ClearNodeCounts");
@@ -232,7 +443,11 @@ namespace BoidsUnity
                 // Set all needed buffers
                 quadTreeShader.SetBuffer(buildUnifiedKernel, "boids", boidBuffer);
                 quadTreeShader.SetBuffer(buildUnifiedKernel, "boidsOut", boidBufferOut);
-                quadTreeShader.SetInt("maxBoidsPerNode", maxBoidsPerNode);
+                
+                // Adjust maxBoidsPerNode for high boid counts to reduce subdivisions
+                int adjustedMaxBoidsPerNode = numBoids > HighBoidCountThreshold ? maxBoidsPerNode * 4 : maxBoidsPerNode;
+                quadTreeShader.SetInt("maxBoidsPerNode", adjustedMaxBoidsPerNode);
+                
                 quadTreeShader.SetInt("numBoids", numBoids);
                 quadTreeShader.SetFloat("worldSize", initialQuadTreeSize);
 
@@ -639,17 +854,24 @@ namespace BoidsUnity
             // Dispatch the compute shader
             shader.Dispatch(kernelId, threadGroupsX, threadGroupsY, threadGroupsZ);
             
-            // Force GPU to complete
-            GL.Flush();
+            // Only force GPU to complete for profiling if below high boid count threshold
+            // This is a critical optimization - GL.Flush() is very expensive with high boid counts
+            bool isHighBoidCount = boidsCount > HighBoidCountThreshold;
+            
+            if (!isHighBoidCount || Time.frameCount % 300 == 0) {
+                GL.Flush();
+            }
             
             sw.Stop();
             double ms = sw.Elapsed.TotalMilliseconds;
             
-            // Record timing data
-            ProfilingUtility.RecordManualTiming(profileName, ms);
+            // Record timing data only if we forced a flush or for low boid counts
+            if (!isHighBoidCount || Time.frameCount % 300 == 0) {
+                ProfilingUtility.RecordManualTiming(profileName, ms);
+            }
             
-            // Log for high boid counts
-            if (boidsCount > 25000 && Time.frameCount % 300 == 0)
+            // Log for high boid counts but only occasionally
+            if (isHighBoidCount && Time.frameCount % 300 == 0)
             {
                 Debug.Log($"{profileName} with {boidsCount} boids took {ms:F2}ms");
             }
@@ -657,6 +879,7 @@ namespace BoidsUnity
         
         public void Cleanup()
         {
+            // Release standard buffers
             quadNodesBuffer?.Release();
             nodeCountBuffer?.Release();
             boidIndicesBuffer?.Release();
@@ -664,6 +887,11 @@ namespace BoidsUnity
             activeNodeCountBuffer?.Release();
             nodeCountsBuffer?.Release();
             subdivDebugBuffer?.Release();
+            
+            // Release incremental update buffers
+            boidHistoryBuffer?.Release();
+            movedBoidIndicesBuffer?.Release();
+            movedBoidCountBuffer?.Release();
         }
     }
 }

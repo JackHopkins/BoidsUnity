@@ -11,6 +11,16 @@ namespace BoidsUnity
         public uint team;
     }
 
+    // Enhanced boid structure with previous position for tracking movement
+    public struct BoidWithHistory
+    {
+        public float2 pos;      // Current position
+        public float2 prevPos;  // Previous position for tracking significant movement
+        public float2 vel;
+        public uint team;
+        public uint nodeIndex;  // Current quadtree node index
+    }
+
     public struct ObstacleData
     {
         public float2 pos;
