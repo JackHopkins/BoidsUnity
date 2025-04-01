@@ -15,7 +15,7 @@ namespace BoidsUnity
         // Settings
         public bool useQuadTree = false;
         public int maxQuadTreeDepth = 8;
-        public int maxBoidsPerNode = 32;
+        public int maxBoidsPerNode = 16; // Reduced from 32 to force more subdivision
         public int initialQuadTreeSize = 500;
         
         // Debug settings
@@ -110,8 +110,9 @@ namespace BoidsUnity
             uint[] initialMovedCount = new uint[] { 0 };
             movedBoidCountBuffer.SetData(initialMovedCount);
             
-            // Set initial parameters - adjust maxBoidsPerNode for high boid counts
-            int adjustedMaxBoidsPerNode = numBoids > HighBoidCountThreshold ? maxBoidsPerNode * 4 : maxBoidsPerNode;
+            // Set initial parameters - adjusted to force more subdivision with high boid counts
+            // For 60K+ boids, use smaller maxBoidsPerNode to force more subdivision
+            int adjustedMaxBoidsPerNode = numBoids > 50000 ? maxBoidsPerNode / 2 : maxBoidsPerNode;
             
             quadTreeShader.SetInt("maxDepth", maxQuadTreeDepth);
             quadTreeShader.SetInt("maxBoidsPerNode", adjustedMaxBoidsPerNode);
@@ -344,7 +345,8 @@ namespace BoidsUnity
                     
                     // 4. Check if nodes need subdivision or merging
                     ProfilingUtility.BeginSample("RepairTreeStructure");
-                    int adjustedMaxBoidsPerNode = numBoids > HighBoidCountThreshold ? maxBoidsPerNode * 4 : maxBoidsPerNode;
+                    // For 60K+ boids, use smaller maxBoidsPerNode to force more subdivision
+                    int adjustedMaxBoidsPerNode = numBoids > 50000 ? maxBoidsPerNode / 2 : maxBoidsPerNode;
                     quadTreeShader.SetInt("maxBoidsPerNode", adjustedMaxBoidsPerNode);
                     
                     TimedDispatch(
@@ -444,8 +446,8 @@ namespace BoidsUnity
                 quadTreeShader.SetBuffer(buildUnifiedKernel, "boids", boidBuffer);
                 quadTreeShader.SetBuffer(buildUnifiedKernel, "boidsOut", boidBufferOut);
                 
-                // Adjust maxBoidsPerNode for high boid counts to reduce subdivisions
-                int adjustedMaxBoidsPerNode = numBoids > HighBoidCountThreshold ? maxBoidsPerNode * 4 : maxBoidsPerNode;
+                // For 60K+ boids, use smaller maxBoidsPerNode to force more subdivision
+                int adjustedMaxBoidsPerNode = numBoids > 50000 ? maxBoidsPerNode / 2 : maxBoidsPerNode;
                 quadTreeShader.SetInt("maxBoidsPerNode", adjustedMaxBoidsPerNode);
                 
                 quadTreeShader.SetInt("numBoids", numBoids);

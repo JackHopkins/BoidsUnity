@@ -3,8 +3,8 @@
 #define NODE_LEAF 1
 #define NODE_ACTIVE 2
 #define MaxQuadNodes 65536  // Increased from 16384 to 65536 for high boid counts
-#define BOUNDARY_THRESHOLD 0.1  // Fraction of quad size to consider "near boundary" (reduced from 0.2)
-#define VELOCITY_FRAMES_AHEAD 1.5 // How many frames ahead to project velocity (reduced from 3.0)
+#define BOUNDARY_THRESHOLD 0.3  // Fraction of quad size to consider "near boundary" (increased from 0.1 to fix detection)
+#define VELOCITY_FRAMES_AHEAD 5.0 // How many frames ahead to project velocity (increased from 1.5 to improve detection)
 #define HIGH_BOID_COUNT_THRESHOLD 25000 // Threshold to activate high-performance optimizations
 
 struct Boid {
@@ -627,88 +627,116 @@ void TrackMovedBoids(uint3 id : SV_DispatchThreadID) {
     Boid currentBoid = boids[id.x];
     BoidWithHistory boidHist = boidHistory[id.x];
     
-    // Skip most processing for high boid counts to improve performance
-    bool isHighBoidCount = numBoids > HIGH_BOID_COUNT_THRESHOLD;
+    // SIMPLIFIED DECISION TREE FOR LARGE BOID COUNTS
+    // To address the 0% update issue, we'll use a more aggressive approach
     
     // Get the current node this boid belongs to
     uint nodeIndex = boidHist.nodeIndex;
     bool needsUpdate = false;
     
-    // Check if the node index is valid
-    if (nodeIndex < MaxQuadNodes) {
-        // Optimization: For high boid counts, check the most critical cases only
-        // 1. First check if it's outside its current node which is the most common case
-        // 2. Only if it's within the node, check for reclassification flag
-        
+    // Always force update if:
+    // 1. The node index is invalid
+    // 2. The node has been flagged for reclassification
+    if (nodeIndex >= MaxQuadNodes) {
+        needsUpdate = true;
+    }
+    else {
         QuadNode node = quadNodes[nodeIndex];
         
-        // Simple position check first (most efficient)
-        float2 boidPos = currentBoid.pos;
-        float nodeSize = node.size;
-        float2 nodeCenter = node.center;
-        
-        bool outsideQuad = 
-            boidPos.x < (nodeCenter.x - nodeSize) || 
-            boidPos.x > (nodeCenter.x + nodeSize) ||
-            boidPos.y < (nodeCenter.y - nodeSize) || 
-            boidPos.y > (nodeCenter.y + nodeSize);
-        
-        if (outsideQuad) {
-            needsUpdate = true;
-        }
-        // Only do more expensive flag check if not already marked for update
-        else if ((node.flags & 0x10) != 0) {
+        // Check for reclassification flag first (very efficient check)
+        if ((node.flags & 0x10) != 0) {
             needsUpdate = true;
         }
         else {
-            float2 boidVel = currentBoid.vel;
+            float2 boidPos = currentBoid.pos;
+            float nodeSize = node.size;
+            float2 nodeCenter = node.center;
             
-            // For high boid counts, we already checked if outside quad - just need boundary checks
-            if (numBoids > HIGH_BOID_COUNT_THRESHOLD) {
-                // We already did the outside quad check above
-                needsUpdate = false;
+            // For 60K+ boids, use different update strategies
+            if (numBoids > 50000) {
+                // HIGH BOID COUNT SPECIAL CASE - Use multiple update strategies
+                
+                // Strategy 1: Position-based checks (outside quad or moving toward boundary)
+                bool outsideQuad = 
+                    boidPos.x < (nodeCenter.x - nodeSize) || 
+                    boidPos.x > (nodeCenter.x + nodeSize) ||
+                    boidPos.y < (nodeCenter.y - nodeSize) || 
+                    boidPos.y > (nodeCenter.y + nodeSize);
+                
+                if (outsideQuad) {
+                    needsUpdate = true;
+                }
+                else {
+                    // Strategy 2: Use random sampling to ensure sufficient updates
+                    // For really large populations, randomly update a percentage of boids
+                    // This ensures we don't miss important reconfigurations
+                    uint hash = id.x * 747796405 + id.y * 2891336453 + id.z;
+                    hash = ((hash >> 13) ^ hash) * 1597334677;
+                    hash = ((hash >> 9) ^ hash) * 1597334677;
+                    hash = (hash >> 16) ^ hash;
+                    
+                    // Randomly update 10% of boids
+                    bool randomUpdate = (hash % 10) == 0;
+                    
+                    // Strategy 3: Movement-based deterministic updates
+                    float2 velocity = currentBoid.vel;
+                    float2 deltaPos = boidPos - boidHist.prevPos;
+                    float moveDistanceSq = dot(deltaPos, deltaPos);
+                    
+                    // Update if moved significantly or moving fast (0.5 is arbitrary)
+                    bool significantMovement = moveDistanceSq > (nodeSize * 0.01);
+                    bool fastMoving = length(velocity) > 0.75;
+                    
+                    needsUpdate = randomUpdate || significantMovement || fastMoving;
+                }
             }
             else {
-                // Detailed check for lower boid counts - check boundaries and velocity
-                // Calculate distance from boid to each boundary of its quad
-                float distToLeftBoundary = boidPos.x - (nodeCenter.x - nodeSize);
-                float distToRightBoundary = (nodeCenter.x + nodeSize) - boidPos.x;
-                float distToBottomBoundary = boidPos.y - (nodeCenter.y - nodeSize);
-                float distToTopBoundary = (nodeCenter.y + nodeSize) - boidPos.y;
+                // NORMAL BOID COUNT CASE - Use standard boundary proximity checks
                 
-                // Calculate threshold distance based on node size
-                float boundaryThreshold = nodeSize * BOUNDARY_THRESHOLD;
+                // First check if boid is outside its quad (most common case)
+                bool outsideQuad = 
+                    boidPos.x < (nodeCenter.x - nodeSize) || 
+                    boidPos.x > (nodeCenter.x + nodeSize) ||
+                    boidPos.y < (nodeCenter.y - nodeSize) || 
+                    boidPos.y > (nodeCenter.y + nodeSize);
                 
-                // Project the boid's position forward based on velocity
-                float2 projectedPos = boidPos + (boidVel * deltaTime * VELOCITY_FRAMES_AHEAD);
-                
-                // Check if the boid is:
-                // 1. Near the left boundary AND moving left
-                // 2. Near the right boundary AND moving right
-                // 3. Near the bottom boundary AND moving down
-                // 4. Near the top boundary AND moving up
-                bool nearLeftAndMovingLeft = distToLeftBoundary < boundaryThreshold && boidVel.x < 0;
-                bool nearRightAndMovingRight = distToRightBoundary < boundaryThreshold && boidVel.x > 0;
-                bool nearBottomAndMovingDown = distToBottomBoundary < boundaryThreshold && boidVel.y < 0;
-                bool nearTopAndMovingUp = distToTopBoundary < boundaryThreshold && boidVel.y > 0;
-                
-                // Also check if the projected position would be outside the current quad
-                bool projectedOutsideQuad = 
-                    projectedPos.x < (nodeCenter.x - nodeSize) || 
-                    projectedPos.x > (nodeCenter.x + nodeSize) ||
-                    projectedPos.y < (nodeCenter.y - nodeSize) || 
-                    projectedPos.y > (nodeCenter.y + nodeSize);
-                
-                // Flag boid as needing update if it's near a boundary and moving toward it,
-                // or if it's projected to leave the quad soon
-                needsUpdate = nearLeftAndMovingLeft || nearRightAndMovingRight || 
-                            nearBottomAndMovingDown || nearTopAndMovingUp ||
-                            projectedOutsideQuad;
+                if (outsideQuad) {
+                    needsUpdate = true;
+                }
+                else {
+                    // Calculate distance from boid to each boundary
+                    float distToLeftBoundary = boidPos.x - (nodeCenter.x - nodeSize);
+                    float distToRightBoundary = (nodeCenter.x + nodeSize) - boidPos.x;
+                    float distToBottomBoundary = boidPos.y - (nodeCenter.y - nodeSize);
+                    float distToTopBoundary = (nodeCenter.y + nodeSize) - boidPos.y;
+                    
+                    // Calculate threshold distance for boundary proximity
+                    float boundaryThreshold = nodeSize * BOUNDARY_THRESHOLD;
+                    
+                    // Get velocity and calculate projected position
+                    float2 velocity = currentBoid.vel;
+                    float2 projectedPos = boidPos + (velocity * deltaTime * VELOCITY_FRAMES_AHEAD);
+                    
+                    // Check boundary proximity with velocity direction
+                    bool nearLeftAndMovingLeft = distToLeftBoundary < boundaryThreshold && velocity.x < 0;
+                    bool nearRightAndMovingRight = distToRightBoundary < boundaryThreshold && velocity.x > 0;
+                    bool nearBottomAndMovingDown = distToBottomBoundary < boundaryThreshold && velocity.y < 0;
+                    bool nearTopAndMovingUp = distToTopBoundary < boundaryThreshold && velocity.y > 0;
+                    
+                    // Check if projected position will be outside the quad
+                    bool projectedOutsideQuad = 
+                        projectedPos.x < (nodeCenter.x - nodeSize) || 
+                        projectedPos.x > (nodeCenter.x + nodeSize) ||
+                        projectedPos.y < (nodeCenter.y - nodeSize) || 
+                        projectedPos.y > (nodeCenter.y + nodeSize);
+                    
+                    // Flag boid as needing update based on boundary checks
+                    needsUpdate = nearLeftAndMovingLeft || nearRightAndMovingRight || 
+                                nearBottomAndMovingDown || nearTopAndMovingUp ||
+                                projectedOutsideQuad;
+                }
             }
         }
-    } else {
-        // If the node index is invalid, force an update
-        needsUpdate = true;
     }
     
     // Add to moved boids list if it needs update
@@ -971,8 +999,9 @@ void BuildQuadtreeUnified(uint3 id : SV_DispatchThreadID) {
     // Ensure node counts are updated
     DeviceMemoryBarrier();
     
-    // PHASE 5: Multi-iteration tree building - iterate up to 3 levels
-    for (int iteration = 0; iteration < 3; iteration++) {
+    // PHASE 5: Multi-iteration tree building - for large boid counts, do more iterations
+    int iterations = numBoids > 50000 ? 6 : 3; // Do more iterations for high boid counts
+    for (int iteration = 0; iteration < iterations; iteration++) {
         // PHASE 5A: Subdivide nodes
         bool didSubdivide = false;
         if (id.x < MaxQuadNodes) {
