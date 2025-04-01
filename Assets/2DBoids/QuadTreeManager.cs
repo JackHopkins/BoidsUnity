@@ -439,6 +439,18 @@ namespace BoidsUnity
             Vector3 size = new Vector3(node.size * 2, node.size * 2, 0.1f);
             Gizmos.DrawWireCube(center, size);
             
+            // Draw division lines for this node to show quadrants
+            if (depth <= gizmoDetailLevel - 1)
+            {
+                Gizmos.color = new Color(color.r, color.g, color.b, 0.3f);
+                Gizmos.DrawLine(
+                    new Vector3(center.x - node.size, center.y, 0),
+                    new Vector3(center.x + node.size, center.y, 0));
+                Gizmos.DrawLine(
+                    new Vector3(center.x, center.y - node.size, 0),
+                    new Vector3(center.x, center.y + node.size, 0));
+            }
+            
             // Display node info based on boid count
             int boidCount = (int)node.count;
             
@@ -465,12 +477,52 @@ namespace BoidsUnity
                 // Alternate colors for child nodes
                 Color childColor = new Color(color.r * 0.8f, color.g * 0.8f, color.b * 0.8f);
                 
-                // Draw each child, with bounds checking
+                // Draw connecting lines from parent to each child
                 for (uint i = 0; i < 4; i++)
                 {
                     uint childIdx = node.childIndex + i;
                     if (childIdx < allNodes.Length)
                     {
+                        QuadNode childNode = allNodes[childIdx];
+                        
+                        // Calculate expected child center position based on quadrant
+                        float childSize = node.size * 0.5f;
+                        float offsetX = (i & 1) != 0 ? -childSize : childSize;
+                        float offsetY = (i & 2) != 0 ? -childSize : childSize;
+                        Vector3 expectedChildCenter = new Vector3(
+                            node.center.x + offsetX,
+                            node.center.y + offsetY,
+                            0);
+                        
+                        // Check if child position matches expected position
+                        Vector3 actualChildCenter = new Vector3(childNode.center.x, childNode.center.y, 0);
+                        float discrepancy = Vector3.Distance(expectedChildCenter, actualChildCenter);
+                        
+                        // If there's significant discrepancy, highlight it
+                        if (discrepancy > 0.01f)
+                        {
+                            Gizmos.color = Color.red;
+                            Gizmos.DrawLine(center, actualChildCenter);
+                            
+                            // Draw expected position as a dashed outline
+                            Gizmos.color = Color.yellow;
+                            Gizmos.DrawWireSphere(expectedChildCenter, childSize * 0.1f);
+                            
+                            #if UNITY_EDITOR
+                            UnityEditor.Handles.color = Color.red;
+                            UnityEditor.Handles.Label(
+                                Vector3.Lerp(center, actualChildCenter, 0.5f), 
+                                "Misaligned");
+                            #endif
+                        }
+                        else
+                        {
+                            // Draw thin connection line from parent to child
+                            Gizmos.color = new Color(0.7f, 0.7f, 0.7f, 0.3f);
+                            Gizmos.DrawLine(center, actualChildCenter);
+                        }
+                        
+                        // Continue recursive drawing
                         DrawQuadNodeWithInfo(allNodes, childIdx, depth + 1, childColor);
                     }
                 }

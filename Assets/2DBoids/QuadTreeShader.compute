@@ -46,9 +46,15 @@ uint GetQuadrant(float2 center, float2 pos) {
 
 // Get child center based on parent center and quadrant
 float2 GetChildCenter(float2 parentCenter, float parentSize, uint quadrant) {
-    float halfSize = parentSize * 0.5;
-    float offsetX = (quadrant & 1) ? -halfSize : halfSize;
-    float offsetY = (quadrant & 2) ? -halfSize : halfSize;
+    // Calculate child size (half of parent size)
+    float childSize = parentSize * 0.5;
+    
+    // For proper quadtree tiling:
+    // - Each child needs to be placed at a full childSize offset from the parent center
+    // - This ensures the child's edge aligns with the parent center, properly tiling the space
+    float offsetX = (quadrant & 1) ? -childSize : childSize;
+    float offsetY = (quadrant & 2) ? -childSize : childSize;
+    
     return parentCenter + float2(offsetX, offsetY);
 }
 
@@ -304,8 +310,10 @@ void SubdivideAndRedistribute(uint3 id : SV_DispatchThreadID) {
                 uint qx = i & 1; // 0 for east, 1 for west
                 uint qy = (i & 2) >> 1; // 0 for north, 1 for south
                 
-                float offsetX = (qx == 0) ? childSize * 0.5 : -childSize * 0.5;
-                float offsetY = (qy == 0) ? childSize * 0.5 : -childSize * 0.5;
+                // Position the child at the correct quadrant
+                // For proper tiling without gaps or overlaps, we need a full childSize offset
+                float offsetX = (qx == 0) ? childSize : -childSize;
+                float offsetY = (qy == 0) ? childSize : -childSize;
                 
                 QuadNode child;
                 child.center = node.center + float2(offsetX, offsetY);
@@ -589,8 +597,10 @@ void BuildQuadtreeUnified(uint3 id : SV_DispatchThreadID) {
                         // Create children
                         float childSize = node.size * 0.5;
                         for (uint i = 0; i < 4; i++) {
-                            float offsetX = (i & 1) ? -childSize * 0.5 : childSize * 0.5;
-                            float offsetY = (i & 2) ? -childSize * 0.5 : childSize * 0.5;
+                            // Position the child at the correct quadrant
+                            // For proper tiling without gaps or overlaps, we need a full childSize offset
+                            float offsetX = (i & 1) ? -childSize : childSize;
+                            float offsetY = (i & 2) ? -childSize : childSize;
                             
                             QuadNode child;
                             child.center = node.center + float2(offsetX, offsetY);
