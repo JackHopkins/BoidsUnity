@@ -28,6 +28,7 @@ namespace BoidsUnity
         public float interTeamRepulsionMultiplier = 2.5f;
         public Color team0Color = Color.blue;
         public Color team1Color = Color.red;
+        public float officerRatio = 0.05f; // Percentage of boids that will be officers
         
         // Obstacle settings
         public float obstacleAvoidanceWeight = 5f;

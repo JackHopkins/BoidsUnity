@@ -11,6 +11,7 @@ struct Boid {
     float2 pos;
     float2 vel;
     uint team;
+    uint status; // 0 = regular boid, 1 = officer
 };
 
 struct BoidWithHistory {
@@ -18,6 +19,7 @@ struct BoidWithHistory {
     float2 prevPos;  // Previous position for tracking movement
     float2 vel;
     uint team;
+    uint status;     // 0 = regular boid, 1 = officer
     uint nodeIndex;  // Current quadtree node index
 };
 

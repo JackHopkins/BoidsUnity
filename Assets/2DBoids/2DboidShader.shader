@@ -2,7 +2,9 @@ Shader "Unlit/boidShader" {
   Properties {
     _Team0Color ("Team 0 Color", Color) = (0, 0, 1, 1)
     _Team1Color ("Team 1 Color", Color) = (1, 0, 0, 1)
+    _OfficerDarkening ("Officer Darkening", Range(0.4, 0.8)) = 0.6
     _Scale ("Scale", Float) = 0.1
+    _OfficerScale ("Scale", Float) = 0.2
   }
   SubShader {
     Pass {
@@ -14,10 +16,12 @@ Shader "Unlit/boidShader" {
         float2 pos;
         float2 vel;
         uint team;
+        uint status;
       };
       struct v2f {
         float4 position : SV_POSITION;
         uint team : TEXCOORD0;
+        uint status : TEXCOORD1;
       };
 
       void rotate2D(inout float2 v, float2 vel) {
@@ -27,8 +31,10 @@ Shader "Unlit/boidShader" {
 
       float4 _Team0Color;
       float4 _Team1Color;
-      //float4 _Colour;
+      float _OfficerDarkening;
       float _Scale;
+      float _OfficerScale;
+      
       StructuredBuffer<Boid> boids;
       StructuredBuffer<float2> _Positions;
 
@@ -38,13 +44,22 @@ Shader "Unlit/boidShader" {
         Boid boid = boids[instanceID];
         float2 pos = _Positions[vertexID - instanceID * 3];
         rotate2D(pos, boid.vel);
-        o.position = UnityObjectToClipPos(float4(pos * _Scale + boid.pos.xy, 0, 0));
+        // Scale officers differently
+        if (boid.status == 0) {
+          o.position = UnityObjectToClipPos(float4(pos * _Scale + boid.pos.xy, 0, 0));
+        } else
+        {
+          o.position = UnityObjectToClipPos(float4(pos * _OfficerScale + boid.pos.xy, 0, 0));
+        }
         o.team = boid.team;
+        o.status = boid.status;
         return o;
       }
 
       fixed4 frag(v2f i) : SV_Target {
-        return i.team == 0 ? _Team0Color : _Team1Color;
+        fixed4 teamColor = i.team == 0 ? _Team0Color : _Team1Color;
+        // Apply darker color for officers
+        return i.status == 1 ? teamColor * _OfficerDarkening : teamColor;
       }
       ENDCG
     }

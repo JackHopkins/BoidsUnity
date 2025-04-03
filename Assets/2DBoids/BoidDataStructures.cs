@@ -9,6 +9,7 @@ namespace BoidsUnity
         public float2 pos;
         public float2 vel;
         public uint team;
+        public uint status; // 0 = regular boid, 1 = officer
     }
 
     // Enhanced boid structure with previous position for tracking movement
@@ -18,6 +19,7 @@ namespace BoidsUnity
         public float2 prevPos;  // Previous position for tracking significant movement
         public float2 vel;
         public uint team;
+        public uint status;     // 0 = regular boid, 1 = officer
         public uint nodeIndex;  // Current quadtree node index
     }
 

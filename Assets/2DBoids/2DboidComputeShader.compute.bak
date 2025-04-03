@@ -7,7 +7,7 @@ struct Boid {
   float2 pos;
   float2 vel;
   uint team;
-  uint status; // 0 = regular boid, 1 = officer
+  uint status; // 0=regular, 1=officer
 };
 
 struct Obstacle {
@@ -54,7 +54,13 @@ uniform float yBound;
 uniform float teamRatio;
 uniform float intraTeamCohesionMultiplier;
 uniform float interTeamRepulsionMultiplier;
-uniform float officerRatio;
+uniform float officerInfluenceRadius;
+uniform float officerInfluenceFactor;
+uniform float officerCount;
+
+// Define officer status as a constant to match C# enum
+#define BOID_STATUS_REGULAR 0
+#define BOID_STATUS_OFFICER 1
 
 
 StructuredBuffer<uint> gridOffsetBuffer;
@@ -285,6 +291,49 @@ void MergedBehaviours(inout Boid boid, uint boidIndex) {
         boid.vel += alignmentForce;
     }
     
+    // Add special behavior for officers and boids influenced by officers
+    // For regular boids - be influenced by officers
+    if (boid.status == BOID_STATUS_REGULAR) {
+        // Find officer influence
+        float2 officerInfluence = float2(0, 0);
+        uint officersFound = 0;
+        
+        // Check all boids for officers (in reality, we'd optimize this with a spatial index)
+        for (uint i = 0; i < numBoids; i++) {
+            Boid other = boidsIn[i];
+            
+            // Only consider officers of the same team
+            if (other.status == BOID_STATUS_OFFICER && other.team == boid.team) {
+                float2 diff = other.pos - boid.pos;
+                float distSq = dot(diff, diff);
+                
+                // Only consider officers within influence radius
+                if (distSq < officerInfluenceRadius * officerInfluenceRadius) {
+                    // Normalize direction and add to influence
+                    // Influence strength decreases with distance
+                    float influence = 1.0 - sqrt(distSq) / officerInfluenceRadius;
+                    officerInfluence += normalize(diff) * influence;
+                    officersFound++;
+                }
+            }
+        }
+        
+        // Apply officer influence if any officers were found
+        if (officersFound > 0) {
+            // Normalize and scale the influence
+            float influenceMag = length(officerInfluence);
+            if (influenceMag > 0.0001) {
+                officerInfluence = normalize(officerInfluence) * min(influenceMag, 1.0);
+                boid.vel += officerInfluence * (officerInfluenceFactor * deltaTime);
+            }
+        }
+    }
+    // For officers - move more deliberately and slower
+    else if (boid.status == BOID_STATUS_OFFICER) {
+        // Officers move more slowly and deliberately
+        boid.vel *= 0.95; // Dampen velocity for more stable movement
+    }
+    
     // Apply separation - steer away from nearby boids
     if (length(close) > 0.0001) {
         boid.vel += close * (separationFactor * deltaTime);
@@ -318,6 +367,7 @@ void KeepInBounds(inout Boid boid) {
   }
 }
 
+// Define the UpdateBoids kernel
 #pragma kernel UpdateBoids
 [numthreads(256, 1, 1)] // Reduce thread count to 256 instead of 1024 to reduce register pressure
 void UpdateBoids(uint3 id : SV_DispatchThreadID) {
@@ -409,6 +459,62 @@ void UpdateBoids(uint3 id : SV_DispatchThreadID) {
     boid.vel += alignmentForce * (alignmentFactor * deltaTime);
   }
   
+  // Add special behavior for officers and boids influenced by officers
+  // For regular boids - be influenced by officers
+  if (boid.status == BOID_STATUS_REGULAR) {
+    // Find officer influence
+    float2 officerInfluence = float2(0, 0);
+    uint officersFound = 0;
+    
+    // Check for nearby officers (using the same neighbor search approach)
+    for (uint i = 0; i < numBoids; i++) {
+      Boid other = boidsIn[i];
+      
+      // Only consider officers of the same team
+      if (other.status == BOID_STATUS_OFFICER && other.team == boid.team) {
+        float2 diff = other.pos - boid.pos;
+        float distSq = dot(diff, diff);
+        
+        // Only consider officers within influence radius
+        if (distSq < officerInfluenceRadius * officerInfluenceRadius) {
+          // Normalize direction and add to influence
+          // Influence strength decreases with distance - using quadratic falloff for smoother influence
+          float dist = sqrt(distSq);
+          float normDist = dist / officerInfluenceRadius;
+          float influence = max(0.0, 1.0 - normDist * normDist); // Quadratic falloff
+          officerInfluence += normalize(diff) * influence * 0.5; // Reduced strength by 50%
+          officersFound++;
+        }
+      }
+    }
+    
+    // Apply officer influence if any officers were found
+    if (officersFound > 0) {
+      // Normalize and scale the influence
+      float influenceMag = length(officerInfluence);
+      if (influenceMag > 0.0001) {
+        officerInfluence = normalize(officerInfluence) * min(influenceMag, 1.0);
+        boid.vel += officerInfluence * (officerInfluenceFactor * deltaTime);
+      }
+    }
+  }
+  // For officers - move more deliberately and slower
+  else if (boid.status == BOID_STATUS_OFFICER) {
+    // Officers should still move around naturally but a bit slower
+    // Less extreme dampening to ensure they still move
+    boid.vel *= 0.98; // Slightly dampen velocity (was 0.95)
+    
+    // Ensure officers don't become stationary
+    float speed = length(boid.vel);
+    if (speed < minSpeed * 0.75) {
+      // Give officers a small random velocity if they're too slow
+      boid.vel += float2(
+        sin(deltaTime * 100.0 + boid.pos.x * 0.1) * 0.01,
+        cos(deltaTime * 100.0 + boid.pos.y * 0.1) * 0.01
+      );
+    }
+  }
+  
   // Apply separation: stronger with more neighbors
   float closeMag = length(close);
   if (closeMag > 0.0001) {
@@ -465,15 +571,54 @@ void GenerateBoids(uint3 id : SV_DispatchThreadID) {
     return;
   }
   
-  rngState = randSeed + id.x;
-  boidsOut[id.x].pos = float2(randPCG(-xBound, xBound), randPCG(-yBound, yBound));
-  boidsOut[id.x].vel = float2(randPCG(-maxSpeed, maxSpeed), randPCG(-maxSpeed, maxSpeed));
+  // Adjust the random seed for each boid to ensure better randomization
+  rngState = randSeed + id.x * 1099511627791; // Large prime multiplier for better distribution
   
-  // Determine team
+  // Distribute boids more evenly within the bounds
+  float xPos = randPCG(-xBound * 0.8, xBound * 0.8); // Spread in x
+  float yPos = randPCG(-yBound * 0.8, yBound * 0.8); // Spread in y
+  boidsOut[id.x].pos = float2(xPos, yPos);
+  
+  // Ensure at least some minimal velocity in random directions
+  float angle = randPCG(0, 3.14159 * 2); // Random angle
+  float speed = randPCG(minSpeed, maxSpeed);
+  boidsOut[id.x].vel = float2(cos(angle), sin(angle)) * speed;
+  
+  // Assign team based on team ratio
   uint threshold = (uint)(numBoids * teamRatio);
   boidsOut[id.x].team = id.x < threshold ? 0u : 1u;
   
-  // Assign officer status based on officerRatio
-  float officerRoll = randPCG(0.0, 1.0);
-  boidsOut[id.x].status = officerRoll < officerRatio ? 1u : 0u;
+  // Determine if this boid is an officer
+  // Safety check to avoid officerCount > numBoids
+  uint actualOfficerCount = min((uint)officerCount, numBoids);
+  uint officerThreshold = numBoids - actualOfficerCount;
+  
+  // Special handling for the case of only one officer
+  if (actualOfficerCount == 1 && id.x == numBoids - 1) {
+    // Place the single officer in the center with random team
+    boidsOut[id.x].pos = float2(0, 0);
+    boidsOut[id.x].vel = float2(randPCG(-0.1, 0.1), randPCG(-0.1, 0.1));
+    boidsOut[id.x].status = BOID_STATUS_OFFICER;
+  } else {
+    boidsOut[id.x].status = id.x >= officerThreshold ? BOID_STATUS_OFFICER : BOID_STATUS_REGULAR;
+    
+    // If this is an officer, set its initial position and velocity
+    if (boidsOut[id.x].status == BOID_STATUS_OFFICER) {
+      // Spread officers away from center
+      float officerIndex = (float)(id.x - officerThreshold);
+      float officerRatio = officerIndex / max(1, actualOfficerCount);
+      float officerAngle = officerRatio * 3.14159 * 2; // Spread officers in a circle
+      
+      // Position officers in a circle at 1/3 of the boundary
+      float officerDistance = min(xBound, yBound) * 0.33;
+      boidsOut[id.x].pos = float2(
+        cos(officerAngle) * officerDistance,
+        sin(officerAngle) * officerDistance
+      );
+      
+      // Officers start with slow, outward-pointing velocity
+      boidsOut[id.x].vel = normalize(boidsOut[id.x].pos) * minSpeed * 1.2;
+    }
+  }
+}
 }

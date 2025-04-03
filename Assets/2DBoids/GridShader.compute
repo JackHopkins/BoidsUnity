@@ -4,6 +4,7 @@ struct Boid {
   float2 pos;
   float2 vel;
   uint team;
+  uint status; // 0 = regular boid, 1 = officer
 };
 
 StructuredBuffer<Boid> boids;
@@ -92,7 +93,10 @@ void RearrangeBoids(uint3 id : SV_DispatchThreadID) {
   uint gridID = gridBuffer[id.x].x;
   uint cellOffset = gridBuffer[id.x].y;
   uint index = gridOffsetBuffer[gridID] - 1 - cellOffset;
-  boidsOut[index] = boids[id.x];
+  
+  // Copy all fields including status field
+  Boid boid = boids[id.x];
+  boidsOut[index] = boid;
 }
 
 #pragma kernel SumBlocks // ID 4

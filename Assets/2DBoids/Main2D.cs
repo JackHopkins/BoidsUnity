@@ -44,6 +44,7 @@ namespace BoidsUnity
         [SerializeField] float interTeamRepulsionMultiplier = 2.5f;
         [SerializeField] Color team0Color = Color.blue;
         [SerializeField] Color team1Color = Color.red;
+        [SerializeField] float officerRatio = 0.05f; // Percentage of boids that will be officers
         
         [Header("Prefabs")]
         [SerializeField] Text fpsText;
@@ -144,6 +145,7 @@ namespace BoidsUnity
                 interTeamRepulsionMultiplier = interTeamRepulsionMultiplier,
                 team0Color = team0Color,
                 team1Color = team1Color,
+                officerRatio = officerRatio,
                 obstacleAvoidanceWeight = obstacleAvoidanceWeight,
                 obstacles = obstacles
             };
@@ -168,9 +170,9 @@ namespace BoidsUnity
         
         private void InitializeBoidBuffers()
         {
-            // Setup compute buffers
-            boidBuffer = new ComputeBuffer(numBoids, 20);
-            boidBufferOut = new ComputeBuffer(numBoids, 20);
+            // Setup compute buffers - Boid is now 24 bytes (float2 pos=8, float2 vel=8, uint team=4, uint status=4)
+            boidBuffer = new ComputeBuffer(numBoids, 24);
+            boidBufferOut = new ComputeBuffer(numBoids, 24);
             
             // Generate boids on CPU or GPU based on limit
             if (numBoids <= cpuLimit)
@@ -187,7 +189,8 @@ namespace BoidsUnity
                     {
                         pos = pos,
                         vel = vel,
-                        team = (uint)(i < numBoids * teamRatio ? 0 : 1) // Assign team based on ratio
+                        team = (uint)(i < numBoids * teamRatio ? 0 : 1), // Assign team based on ratio
+                        status = (uint)(UnityEngine.Random.Range(0f, 1f) < officerRatio ? 1 : 0) // Assign officer status based on ratio
                     };
                     boids[i] = boid;
                 }
@@ -221,6 +224,7 @@ namespace BoidsUnity
             boidShader.SetFloat("teamRatio", teamRatio);
             boidShader.SetFloat("intraTeamCohesionMultiplier", intraTeamCohesionMultiplier);
             boidShader.SetFloat("interTeamRepulsionMultiplier", interTeamRepulsionMultiplier);
+            boidShader.SetFloat("officerRatio", officerRatio);
             
             // Set grid parameters to boid shader
             boidShader.SetBuffer(updateBoidsKernel, "gridOffsetBuffer", gridManager.gridOffsetBuffer);
@@ -362,6 +366,17 @@ namespace BoidsUnity
             var readback = AsyncGPUReadback.Request(boidBuffer);
             readback.WaitForCompletion();
             readback.GetData<Boid>().CopyTo(boids);
+            
+            // Ensure boids have correct status values when switching modes
+            for (int i = 0; i < numBoids; i++)
+            {
+                var boid = boids[i];
+                if (boid.status != 0 && boid.status != 1)
+                {
+                    boid.status = (uint)(UnityEngine.Random.Range(0f, 1f) < officerRatio ? 1 : 0);
+                    boids[i] = boid;
+                }
+            }
         }
         
         public void SwitchTo3D()

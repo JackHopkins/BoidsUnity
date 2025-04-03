@@ -102,7 +102,7 @@ namespace BoidsUnity
             nodeCountsBuffer = new ComputeBuffer(MaxQuadNodes, 4);
             
             // Create incremental update buffers
-            boidHistoryBuffer = new ComputeBuffer(numBoids, 28); // BoidWithHistory struct (pos, prevPos, vel, team, nodeIndex)
+            boidHistoryBuffer = new ComputeBuffer(numBoids, 32); // BoidWithHistory struct (pos, prevPos, vel, team, status, nodeIndex)
             movedBoidIndicesBuffer = new ComputeBuffer(numBoids, 4);
             movedBoidCountBuffer = new ComputeBuffer(1, 4);
             
