@@ -13,6 +13,13 @@ namespace BoidsUnity
         public float gridCellSize;
         public int blocks;
         
+        // Officer grid dimensions (4x smaller on each side, 16x smaller in total)
+        public int officerGridDimX;
+        public int officerGridDimY;
+        public int officerGridTotalCells;
+        public float officerGridCellSize;
+        public int officerBlocks;
+        
         // CPU-side data structures for the grid
         private NativeArray<int2> grid;
         private NativeArray<int> gridOffsets;
@@ -24,6 +31,13 @@ namespace BoidsUnity
         public ComputeBuffer gridSumsBuffer;
         public ComputeBuffer gridSumsBuffer2;
         
+        // GPU buffers for the officer grid
+        public ComputeBuffer officerGridBuffer;
+        public ComputeBuffer officerGridOffsetBuffer;
+        public ComputeBuffer officerGridOffsetBufferIn;
+        public ComputeBuffer officerGridSumsBuffer;
+        public ComputeBuffer officerGridSumsBuffer2;
+        
         // Kernel IDs
         private int updateGridKernel;
         private int clearGridKernel;
@@ -31,6 +45,11 @@ namespace BoidsUnity
         private int sumBlocksKernel;
         private int addSumsKernel;
         private int rearrangeBoidsKernel;
+        
+        // Officer grid kernel IDs
+        private int officerPrefixSumKernel;
+        private int officerSumBlocksKernel;
+        private int officerAddSumsKernel;
         
         private ComputeShader gridShader;
         private BoidBehaviorManager behaviorManager;
@@ -40,36 +59,55 @@ namespace BoidsUnity
             gridShader = shader;
             behaviorManager = boidManager;
             
-            // Get kernel IDs
+            // Get kernel IDs for regular grid
             updateGridKernel = gridShader.FindKernel("UpdateGrid");
             clearGridKernel = gridShader.FindKernel("ClearGrid");
             prefixSumKernel = gridShader.FindKernel("PrefixSum");
             sumBlocksKernel = gridShader.FindKernel("SumBlocks");
             addSumsKernel = gridShader.FindKernel("AddSums");
             rearrangeBoidsKernel = gridShader.FindKernel("RearrangeBoids");
+            
+            // Get kernel IDs for officer grid
+            officerPrefixSumKernel = gridShader.FindKernel("OfficerPrefixSum");
+            officerSumBlocksKernel = gridShader.FindKernel("OfficerSumBlocks");
+            officerAddSumsKernel = gridShader.FindKernel("OfficerAddSums");
         }
         
         public void Initialize(int numBoids, float visualRange, float xBound, float yBound, ComputeBuffer boidBuffer, ComputeBuffer boidBufferOut)
         {
-            // Set up the spatial grid
+            // Set up the regular spatial grid
             gridCellSize = visualRange;
             gridDimX = Mathf.FloorToInt(xBound * 2 / gridCellSize) + 30;
             gridDimY = Mathf.FloorToInt(yBound * 2 / gridCellSize) + 30;
             gridTotalCells = gridDimX * gridDimY;
             blocks = Mathf.CeilToInt(gridTotalCells / 256f);
             
+            // Set up the officer grid (4x smaller on each dimension)
+            officerGridCellSize = visualRange * 4f;
+            officerGridDimX = Mathf.FloorToInt(xBound * 2 / officerGridCellSize) + 8; // 8 instead of 30/4 for safety padding
+            officerGridDimY = Mathf.FloorToInt(yBound * 2 / officerGridCellSize) + 8;
+            officerGridTotalCells = officerGridDimX * officerGridDimY;
+            officerBlocks = Mathf.CeilToInt(officerGridTotalCells / 256f);
+            
             // Create CPU-side arrays if needed (for CPU mode)
             grid = new NativeArray<int2>(numBoids, Allocator.Persistent);
             gridOffsets = new NativeArray<int>(gridTotalCells, Allocator.Persistent);
             
-            // Create GPU buffers
+            // Create regular grid GPU buffers
             gridBuffer = new ComputeBuffer(numBoids, 8);
             gridOffsetBuffer = new ComputeBuffer(gridTotalCells, 4);
             gridOffsetBufferIn = new ComputeBuffer(gridTotalCells, 4);
             gridSumsBuffer = new ComputeBuffer(blocks, 4);
             gridSumsBuffer2 = new ComputeBuffer(blocks, 4);
             
-            // Set up shader parameters
+            // Create officer grid GPU buffers
+            officerGridBuffer = new ComputeBuffer(numBoids, 8);
+            officerGridOffsetBuffer = new ComputeBuffer(officerGridTotalCells, 4);
+            officerGridOffsetBufferIn = new ComputeBuffer(officerGridTotalCells, 4);
+            officerGridSumsBuffer = new ComputeBuffer(officerBlocks, 4);
+            officerGridSumsBuffer2 = new ComputeBuffer(officerBlocks, 4);
+            
+            // Set up shader parameters - regular grid
             gridShader.SetInt("numBoids", numBoids);
             gridShader.SetBuffer(updateGridKernel, "boids", boidBuffer);
             gridShader.SetBuffer(updateGridKernel, "gridBuffer", gridBuffer);
@@ -89,25 +127,50 @@ namespace BoidsUnity
             gridShader.SetBuffer(rearrangeBoidsKernel, "boids", boidBuffer);
             gridShader.SetBuffer(rearrangeBoidsKernel, "boidsOut", boidBufferOut);
 
+            // Set up officer grid buffers
+            gridShader.SetBuffer(updateGridKernel, "officerGridBuffer", officerGridBuffer);
+            gridShader.SetBuffer(updateGridKernel, "officerGridOffsetBuffer", officerGridOffsetBufferIn);
+            
+            gridShader.SetBuffer(clearGridKernel, "officerGridOffsetBuffer", officerGridOffsetBufferIn);
+            
+            gridShader.SetBuffer(officerPrefixSumKernel, "officerGridOffsetBuffer", officerGridOffsetBuffer);
+            gridShader.SetBuffer(officerPrefixSumKernel, "officerGridOffsetBufferIn", officerGridOffsetBufferIn);
+            gridShader.SetBuffer(officerPrefixSumKernel, "officerGridSumsBuffer", officerGridSumsBuffer2);
+            
+            gridShader.SetBuffer(officerSumBlocksKernel, "officerGridSumsBuffer", officerGridSumsBuffer);
+            gridShader.SetBuffer(officerSumBlocksKernel, "officerGridSumsBufferIn", officerGridSumsBuffer2);
+            
+            gridShader.SetBuffer(officerAddSumsKernel, "officerGridOffsetBuffer", officerGridOffsetBuffer);
+            gridShader.SetBuffer(officerAddSumsKernel, "officerGridSumsBufferIn", officerGridSumsBuffer);
+
+            // Regular grid dimensions/properties
             gridShader.SetFloat("gridCellSize", gridCellSize);
             gridShader.SetInt("gridDimY", gridDimY);
             gridShader.SetInt("gridDimX", gridDimX);
             gridShader.SetInt("gridTotalCells", gridTotalCells);
             gridShader.SetInt("blocks", blocks);
+            
+            // Officer grid dimensions/properties
+            gridShader.SetFloat("officerGridCellSize", officerGridCellSize);
+            gridShader.SetInt("officerGridDimY", officerGridDimY);
+            gridShader.SetInt("officerGridDimX", officerGridDimX);
+            gridShader.SetInt("officerGridTotalCells", officerGridTotalCells);
+            gridShader.SetInt("officerBlocks", officerBlocks);
         }
         
         public void UpdateGridGPU(int numBoids, ComputeBuffer boidBuffer, ComputeBuffer boidBufferOut)
         {   
-            // Clear indices
+            // Clear indices for both regular and officer grids
             ProfilingUtility.BeginSample("ClearGridIndices");
-            gridShader.Dispatch(clearGridKernel, blocks, 1, 1);
+            gridShader.Dispatch(clearGridKernel, Mathf.Max(blocks, officerBlocks), 1, 1);
             ProfilingUtility.EndSample("ClearGridIndices");
 
-            // Populate grid
+            // Populate both grids
             ProfilingUtility.BeginSample("PopulateGrid");
             gridShader.Dispatch(updateGridKernel, Mathf.CeilToInt(numBoids / 256f), 1, 1);
             ProfilingUtility.EndSample("PopulateGrid");
 
+            // REGULAR GRID PROCESSING
             // Generate Offsets (Prefix Sum)
             // Offsets in each block
             ProfilingUtility.BeginSample("PrefixSumBlocks");
@@ -132,6 +195,31 @@ namespace BoidsUnity
             gridShader.SetBuffer(addSumsKernel, "gridSumsBufferIn", swap ? gridSumsBuffer : gridSumsBuffer2);
             gridShader.Dispatch(addSumsKernel, blocks, 1, 1);
             ProfilingUtility.EndSample("ApplySums");
+
+            // OFFICER GRID PROCESSING
+            // Generate Offsets (Prefix Sum) for officer grid
+            ProfilingUtility.BeginSample("OfficerPrefixSumBlocks");
+            gridShader.Dispatch(officerPrefixSumKernel, officerBlocks, 1, 1);
+            ProfilingUtility.EndSample("OfficerPrefixSumBlocks");
+
+            // Offsets for sums of blocks in officer grid
+            ProfilingUtility.BeginSample("OfficerPrefixSumHierarchical");
+            bool officerSwap = false;
+            for (int d = 1; d < officerBlocks; d *= 2)
+            {
+                gridShader.SetBuffer(officerSumBlocksKernel, "officerGridSumsBufferIn", officerSwap ? officerGridSumsBuffer : officerGridSumsBuffer2);
+                gridShader.SetBuffer(officerSumBlocksKernel, "officerGridSumsBuffer", officerSwap ? officerGridSumsBuffer2 : officerGridSumsBuffer);
+                gridShader.SetInt("d", d);
+                gridShader.Dispatch(officerSumBlocksKernel, Mathf.CeilToInt(officerBlocks / 256f), 1, 1);
+                officerSwap = !officerSwap;
+            }
+            ProfilingUtility.EndSample("OfficerPrefixSumHierarchical");
+
+            // Apply offsets of sums to each officer block
+            ProfilingUtility.BeginSample("OfficerApplySums");
+            gridShader.SetBuffer(officerAddSumsKernel, "officerGridSumsBufferIn", officerSwap ? officerGridSumsBuffer : officerGridSumsBuffer2);
+            gridShader.Dispatch(officerAddSumsKernel, officerBlocks, 1, 1);
+            ProfilingUtility.EndSample("OfficerApplySums");
 
             // Rearrange boids
             ProfilingUtility.BeginSample("RearrangeBoids");
@@ -214,11 +302,19 @@ namespace BoidsUnity
             if (grid.IsCreated) grid.Dispose();
             if (gridOffsets.IsCreated) gridOffsets.Dispose();
             
+            // Release regular grid buffers
             gridBuffer?.Release();
             gridOffsetBuffer?.Release();
             gridOffsetBufferIn?.Release();
             gridSumsBuffer?.Release();
             gridSumsBuffer2?.Release();
+            
+            // Release officer grid buffers
+            officerGridBuffer?.Release();
+            officerGridOffsetBuffer?.Release();
+            officerGridOffsetBufferIn?.Release();
+            officerGridSumsBuffer?.Release();
+            officerGridSumsBuffer2?.Release();
         }
         
         public int[] GetGridOffsets()

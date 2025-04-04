@@ -10,6 +10,11 @@ namespace BoidsUnity
         [SerializeField] private Slider numSlider;
         [SerializeField] private Button modeButton;
         
+        [Header("Grid Visualization")]
+        [SerializeField] private Button toggleGridsButton;
+        [SerializeField] private Button toggleRegularGridButton;
+        [SerializeField] private Button toggleOfficerGridButton;
+        
         private bool useGpu = false;
         private int numBoids = 500;
         private readonly int cpuLimit = 1 << 16;
@@ -30,6 +35,22 @@ namespace BoidsUnity
             
             // Set button color and text based on mode
             UpdateModeButton();
+            
+            // Set up grid visualization button listeners
+            if (toggleGridsButton != null)
+            {
+                toggleGridsButton.onClick.AddListener(ToggleGrids);
+            }
+            
+            if (toggleRegularGridButton != null)
+            {
+                toggleRegularGridButton.onClick.AddListener(ToggleRegularGrid);
+            }
+            
+            if (toggleOfficerGridButton != null)
+            {
+                toggleOfficerGridButton.onClick.AddListener(ToggleOfficerGrid);
+            }
         }
         
         public void UpdateFPS()
@@ -70,6 +91,50 @@ namespace BoidsUnity
         public void SwitchTo3D()
         {
             UnityEngine.SceneManagement.SceneManager.LoadScene("Boids3DScene");
+        }
+        
+        // Grid visualization methods
+        public void ToggleGrids()
+        {
+            if (mainController != null)
+            {
+                mainController.ToggleGridVisualization();
+            }
+        }
+        
+        public void ToggleRegularGrid()
+        {
+            if (mainController != null)
+            {
+                mainController.ToggleRegularGrid();
+            }
+        }
+        
+        public void ToggleOfficerGrid()
+        {
+            if (mainController != null)
+            {
+                mainController.ToggleOfficerGrid();
+            }
+        }
+        
+        private void OnDestroy()
+        {
+            // Clean up button listeners
+            if (toggleGridsButton != null)
+            {
+                toggleGridsButton.onClick.RemoveListener(ToggleGrids);
+            }
+            
+            if (toggleRegularGridButton != null)
+            {
+                toggleRegularGridButton.onClick.RemoveListener(ToggleRegularGrid);
+            }
+            
+            if (toggleOfficerGridButton != null)
+            {
+                toggleOfficerGridButton.onClick.RemoveListener(ToggleOfficerGrid);
+            }
         }
     }
 }

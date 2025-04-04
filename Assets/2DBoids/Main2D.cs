@@ -56,12 +56,19 @@ namespace BoidsUnity
         [SerializeField] ComputeShader quadTreeShader;
         [SerializeField] Material boidMat;
         
+        [Header("Visualization")]
+        [SerializeField] private bool showGrids = true;
+        [SerializeField] private Material gridLineMaterial;
+        
         // Component managers
         private BoidBehaviorManager boidBehaviorManager;
         private GridManager gridManager;
         private QuadTreeManager quadTreeManager;
         private ObstacleManager obstacleManager;
         private BoidRenderer boidRenderer;
+
+        private CameraGridRenderer cameraGridRenderer;
+        private SimpleGridRenderer simpleGridRenderer;
         
         // Boid data
         private NativeArray<Boid> boids;
@@ -124,6 +131,16 @@ namespace BoidsUnity
             quadTreeManager.Initialize(numBoids, boidBuffer, boidBufferOut, boidShader);
             boidRenderer.Initialize(boidBuffer, team0Color, team1Color);
             
+            // Initialize grid visualization (after grid manager is set up)
+            if (showGrids)
+            {
+                // Initialize simple grid renderer
+                simpleGridRenderer = gameObject.AddComponent<SimpleGridRenderer>();
+                simpleGridRenderer.Initialize(gridManager);
+                
+                Debug.Log("Grid visualization initialized using SimpleGridRenderer");
+            }
+            
             // Set boid shader parameters
             SetBoidShaderParameters();
         }
@@ -166,6 +183,13 @@ namespace BoidsUnity
             obstacleManager = new ObstacleManager(obstacleAvoidanceWeight, maxObstacles);
             
             boidRenderer = new BoidRenderer(boidMat);
+            
+            // Remove old camera grid renderer if there is one
+            var existingRenderer = Camera.main?.GetComponent<CameraGridRenderer>();
+            if (existingRenderer != null)
+            {
+                Destroy(existingRenderer);
+            }
         }
         
         private void InitializeBoidBuffers()
@@ -384,6 +408,43 @@ namespace BoidsUnity
             UnityEngine.SceneManagement.SceneManager.LoadScene("Boids3DScene");
         }
         
+        public void ToggleGridVisualization()
+        {
+            showGrids = !showGrids;
+            if (simpleGridRenderer != null)
+            {
+                simpleGridRenderer.SetVisualizationActive(showGrids);
+                Debug.Log($"Grid visualization: {(showGrids ? "Enabled" : "Disabled")}");
+            }
+            else if (showGrids)
+            {
+                // Initialize if we don't have it
+                simpleGridRenderer = gameObject.AddComponent<SimpleGridRenderer>();
+                if (gridManager != null)
+                {
+                    simpleGridRenderer.Initialize(gridManager);
+                }
+            }
+        }
+        
+        public void ToggleRegularGrid()
+        {
+            if (simpleGridRenderer != null)
+            {
+                simpleGridRenderer.ToggleRegularGrid();
+                Debug.Log($"Regular grid: {(simpleGridRenderer.showRegularGrid ? "Visible" : "Hidden")}");
+            }
+        }
+        
+        public void ToggleOfficerGrid()
+        {
+            if (simpleGridRenderer != null)
+            {
+                simpleGridRenderer.ToggleOfficerGrid();
+                Debug.Log($"Officer grid: {(simpleGridRenderer.showOfficerGrid ? "Visible" : "Hidden")}");
+            }
+        }
+        
         // Public methods for UI to call
         public void RestartSimulation(int newBoidCount)
         {
@@ -419,6 +480,21 @@ namespace BoidsUnity
             quadTreeManager?.Cleanup();
             obstacleManager?.Cleanup();
             boidRenderer?.Cleanup();
+           
+            
+            // Clean up camera grid renderer
+            if (cameraGridRenderer != null)
+            {
+                Destroy(cameraGridRenderer);
+                cameraGridRenderer = null;
+            }
+            
+            // Clean up simple grid renderer
+            if (simpleGridRenderer != null)
+            {
+                Destroy(simpleGridRenderer);
+                simpleGridRenderer = null;
+            }
             
             // Clean up compute buffers
             boidBuffer?.Release();

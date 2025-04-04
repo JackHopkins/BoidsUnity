@@ -7,12 +7,11 @@
     <list default="true" id="a29717c5-c8c3-4fc2-98a6-2ca9fec8491f" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Assets/2DBoids/2DboidComputeShader.compute" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/2DboidComputeShader.compute" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/2DboidShader.shader" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/2DboidShader.shader" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/BoidDataStructures.cs" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/BoidDataStructures.cs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/GridManager.cs" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/GridManager.cs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Assets/2DBoids/GridShader.compute" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/GridShader.compute" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Assets/2DBoids/Main2D.cs" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/Main2D.cs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/QuadTreeManager.cs" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/QuadTreeManager.cs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/QuadTreeShader.compute" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/QuadTreeShader.compute" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/Materials/GridLineMaterial.mat" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/Materials/GridLineMaterial.mat" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Assets/2DBoids/UIManager.cs" beforeDir="false" afterPath="$PROJECT_DIR$/Assets/2DBoids/UIManager.cs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -50,6 +49,7 @@
     <setting file="file://$PROJECT_DIR$/Assets/2DBoids/QuadTreeManager.cs" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Assets/2DBoids/QuadTreeShader.compute" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Assets/2DBoids/QuadTreeShader.old.compute" root0="SKIP_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Assets/2DBoids/SimpleGridRenderer.cs" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Assets/3DBoids/3DBoidComputeShader.compute" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Assets/3DBoids/GridShader3D.compute" root0="SKIP_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Assets/3DBoids/Main3D.cs" root0="SKIP_HIGHLIGHTING" />

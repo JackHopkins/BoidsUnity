@@ -15,6 +15,13 @@ StructuredBuffer<uint> gridOffsetBufferIn;
 RWStructuredBuffer<uint> gridSumsBuffer;
 StructuredBuffer<uint> gridSumsBufferIn;
 
+// Officer grid buffers (4x smaller on each side)
+RWStructuredBuffer<uint2> officerGridBuffer;    // Store officer grid cell and offset
+RWStructuredBuffer<uint> officerGridOffsetBuffer;
+StructuredBuffer<uint> officerGridOffsetBufferIn;
+RWStructuredBuffer<uint> officerGridSumsBuffer;
+StructuredBuffer<uint> officerGridSumsBufferIn;
+
 float gridCellSize;
 uint gridDimY;
 uint gridDimX;
@@ -23,10 +30,23 @@ uint blocks;
 uint numBoids;
 uint d;
 
+// Officer grid dimensions (4x smaller on each dimension)
+float officerGridCellSize; // 4x larger than regular grid
+uint officerGridDimY;      // 4x smaller than regular grid
+uint officerGridDimX;      // 4x smaller than regular grid
+uint officerGridTotalCells;
+uint officerBlocks;
+
 uint getGridID(Boid boid) {
   int x = floor(boid.pos.x / gridCellSize + gridDimX / 2);
   int y = floor(boid.pos.y / gridCellSize + gridDimY / 2);
   return (gridDimX * y) + x;
+}
+
+uint getOfficerGridID(Boid boid) {
+  int x = floor(boid.pos.x / officerGridCellSize + officerGridDimX / 2);
+  int y = floor(boid.pos.y / officerGridCellSize + officerGridDimY / 2);
+  return (officerGridDimX * y) + x;
 }
 
 #pragma kernel UpdateGrid // ID 0
@@ -36,19 +56,33 @@ void UpdateGrid(uint3 id : SV_DispatchThreadID, uint localID : SV_GROUPTHREADID)
     return;
   }
 
-  int gridID = getGridID(boids[id.x]);
+  Boid boid = boids[id.x];
+  
+  // Update regular grid for all boids
+  int gridID = getGridID(boid);
   gridBuffer[id.x].x = gridID;
   InterlockedAdd(gridOffsetBuffer[gridID], 1, gridBuffer[id.x].y);
+  
+  // Update officer grid only for officers (status == 1)
+  if (boid.status == 1) {
+    int officerGridID = getOfficerGridID(boid);
+    officerGridBuffer[id.x].x = officerGridID;
+    InterlockedAdd(officerGridOffsetBuffer[officerGridID], 1, officerGridBuffer[id.x].y);
+  }
 }
 
 #pragma kernel ClearGrid // ID 1
 [numthreads(blockSize, 1, 1)]
 void ClearGrid(uint3 id : SV_DispatchThreadID) {
-  if (id.x >= gridTotalCells) {
-    return;
+  // Clear regular grid
+  if (id.x < gridTotalCells) {
+    gridOffsetBuffer[id.x] = 0;
   }
-
-  gridOffsetBuffer[id.x] = 0;
+  
+  // Clear officer grid (only if within officer grid bounds)
+  if (id.x < officerGridTotalCells) {
+    officerGridOffsetBuffer[id.x] = 0;
+  }
 }
 
 groupshared int temp[blockSize * 2];
@@ -80,6 +114,36 @@ void PrefixSum(uint globalID : SV_DispatchThreadID, uint localID : SV_GROUPTHREA
   gridOffsetBuffer[globalID] = temp[pout * blockSize + localID];
   if (localID == 0) {
     gridSumsBuffer[groupID] = temp[pout * blockSize + blockSize - 1];
+  }
+}
+
+#pragma kernel OfficerPrefixSum // ID 6
+[numthreads(blockSize, 1, 1)]
+void OfficerPrefixSum(uint globalID : SV_DispatchThreadID, uint localID : SV_GROUPTHREADID, uint groupID : SV_GROUPID) {
+  int pout = 0, pin = 1;
+  temp[localID] = officerGridOffsetBufferIn[globalID];
+  GroupMemoryBarrierWithGroupSync();
+
+  [unroll]
+  for (uint offset = 1; offset < blockSize; offset *= 2) {
+    pout = 1 - pout; // swap double buffer indices
+    pin = 1 - pout;
+    if (localID >= offset) {
+      temp[pout * blockSize + localID] = temp[pin * blockSize + localID] + temp[pin * blockSize + localID - offset];
+    } else {
+      temp[pout * blockSize + localID] = temp[pin * blockSize + localID];
+    }
+    GroupMemoryBarrierWithGroupSync();
+  }
+
+  // Don't write out of bounds
+  if (globalID >= officerGridTotalCells) {
+    return;
+  }
+
+  officerGridOffsetBuffer[globalID] = temp[pout * blockSize + localID];
+  if (localID == 0) {
+    officerGridSumsBuffer[groupID] = temp[pout * blockSize + blockSize - 1];
   }
 }
 
@@ -115,6 +179,22 @@ void SumBlocks(uint3 id : SV_DISPATCHTHREADID) {
   }
 }
 
+#pragma kernel OfficerSumBlocks // ID 7
+[numthreads(blockSize, 1, 1)]
+void OfficerSumBlocks(uint3 id : SV_DISPATCHTHREADID) {
+  if (id.x >= officerBlocks) {
+    return;
+  }
+
+  uint k = id.x;
+
+  if (k < d) {
+    officerGridSumsBuffer[k] = officerGridSumsBufferIn[k];
+  } else {
+    officerGridSumsBuffer[k] = officerGridSumsBufferIn[k] + officerGridSumsBufferIn[k - d];
+  }
+}
+
 #pragma kernel AddSums // ID 5
 [numthreads(blockSize, 1, 1)]
 void AddSums(uint globalID : SV_DISPATCHTHREADID, uint groupID : SV_GROUPID) {
@@ -122,4 +202,13 @@ void AddSums(uint globalID : SV_DISPATCHTHREADID, uint groupID : SV_GROUPID) {
     return;
   }
   gridOffsetBuffer[globalID] += gridSumsBufferIn[groupID - 1];
+}
+
+#pragma kernel OfficerAddSums // ID 8
+[numthreads(blockSize, 1, 1)]
+void OfficerAddSums(uint globalID : SV_DISPATCHTHREADID, uint groupID : SV_GROUPID) {
+  if (groupID == 0 || globalID > officerGridTotalCells) {
+    return;
+  }
+  officerGridOffsetBuffer[globalID] += officerGridSumsBufferIn[groupID - 1];
 }
